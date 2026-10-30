@@ -1,0 +1,11 @@
+schemaVersion: "1.2"
+endpoints:
+  - name: people-operations-mcp
+    displayName: People Operations MCP
+    service:
+      basePath: /
+      port: 8080
+    type: REST
+    networkVisibilities:
+      - Public
+    schemaFilePath: .choreo/openapi.yaml

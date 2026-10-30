@@ -1,0 +1,102 @@
+openapi: 3.0.3
+info:
+  title: People Operations MCP Server
+  version: 1.0.0
+  description: Domain Model Context Protocol (MCP) server for WSO2 People Operations tools.
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns service health status.
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+
+  /register:
+    get:
+      summary: Discover and register MCP tool buckets
+      description: Returns active BucketKit definitions for People Operations tools.
+      responses:
+        "200":
+          description: List of registered BucketKits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    bucket:
+                      type: string
+                    domain:
+                      type: string
+                    description:
+                      type: string
+                    version:
+                      type: string
+                    trigger_phrases:
+                      type: array
+                      items:
+                        type: string
+                    suggested_prompts:
+                      type: array
+                      items:
+                        type: string
+                    prompt_fragment:
+                      type: string
+                    tools:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          description:
+                            type: string
+                          read_only:
+                            type: boolean
+                          requires_confirmation:
+                            type: boolean
+                          input_schema:
+                            type: object
+
+  /tools/{tool_name}:
+    post:
+      summary: Execute an MCP tool
+      description: Proxies tool invocation with user token relay to downstream enterprise backends.
+      parameters:
+        - name: tool_name
+          in: path
+          required: true
+          description: Name of the tool to execute
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Successful tool execution
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid request payload or missing parameters
+        "401":
+          description: Missing or invalid authentication token
+        "404":
+          description: Unknown tool requested
+        "500":
+          description: Internal server or downstream backend error
