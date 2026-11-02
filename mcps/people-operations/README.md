@@ -1,7 +1,8 @@
 # People Operations MCP Server
 
 Domain Model Context Protocol (MCP) server for WSO2 People Operations tools.
-Provides domain-specific tools for leave management, cafeteria menus, campus vehicle parking, office locations, official HR letters, and meal/commute subscriptions.
+Provides domain-specific tools for leave management, cafeteria menus, campus vehicle parking, office locations,
+official HR letters, and meal/commute subscriptions.
 
 Registers with the **Agent Orchestrator** via the standard HTTP REST Tool Protocol:
 - `GET /health`: Health probe.
@@ -14,7 +15,7 @@ Registers with the **Agent Orchestrator** via the standard HTTP REST Tool Protoc
 
 | Bucket | Domain | Tools | Description |
 | :--- | :--- | :--- | :--- |
-| **`LEAVE_STANDARD`** | People Operations | `validate_leave`, `submit_leave`, `get_leave_history`, `get_pending_leaves`, `cancel_leave`, `check_calendar` | Casual, sick, and annual leave management. |
+| **`LEAVE_STANDARD`** | People Operations | `validate_leave`, `submit_leave`, `get_leave_history`, `get_pending_leaves`, `get_leave_balance`, `cancel_leave`, `check_calendar` | Casual, sick, and annual leave management. |
 | **`PO_VEHICLES`** | People Operations | `get_vehicles`, `add_vehicle`, `delete_vehicle` | Campus vehicle registration and parking. |
 | **`PO_EMPLOYEE`** | People Operations | `get_my_location`, `fetch_leads` | Employee office and workplace location queries. |
 | **`PO_LETTERS`** | People Operations | `get_letter_request_form` | Official HR letter requests. |
@@ -28,23 +29,20 @@ Registers with the **Agent Orchestrator** via the standard HTTP REST Tool Protoc
 ```
 mcps/people-operations/
 ├── .choreo/
-│   ├── component.yaml        # Choreo REST endpoint configuration (port 8080)
-│   └── openapi.yaml          # OpenAPI contract for Choreo Gateway
-├── .dockerignore
+│   └── component.yaml        # Choreo REST endpoint configuration (port 8080)
 ├── .env.example              # Configuration template
 ├── .gitignore                # Ignores compiled binaries and secrets
-├── Dockerfile                # Multi-stage non-root container for Choreo
 ├── README.md                 # Architecture and service documentation
 ├── go.mod                    # Go module definition
 ├── go.sum
 ├── main.go                   # Server initialization and routing
-├── internal/
-│   ├── auth/                 # Identity token extraction and claim parsing
-│   ├── buckets/              # Modular bucket definitions and tool schemas
-│   ├── client/               # Downstream backend HTTP clients
-│   ├── handler/              # HTTP handlers for register, health, and tools
-│   └── model/                # Core domain and schema types
-└── tests/                    # Automated unit and integration tests
+├── main_test.go              # Server initialization and routing tests
+├── openapi.yaml              # OpenAPI contract for Choreo Gateway
+└── internal/
+    ├── auth/                 # Identity token extraction and claim parsing
+    ├── buckets/              # Modular bucket definitions and tool schemas
+    ├── handler/              # HTTP handlers for register, health, and tools
+    └── model/                # Core domain and schema types
 ```
 
 ---

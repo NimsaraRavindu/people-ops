@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -572,5 +573,131 @@ func TestSubscribeCommutePayloadWithHTTPClient(t *testing.T) {
 	}
 	if !subscribeCalled {
 		t.Fatalf("expected subscribe endpoint to be called")
+	}
+}
+
+func TestSubscribeCommuteStringDistance(t *testing.T) {
+	var subscribeCalled bool
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		if strings.Contains(req.URL.Path, "subscriptions/meta-info") {
+			metaJSON := `{"distances":[{"id":5,"minKm":10,"maxKm":20}]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(metaJSON)),
+				Header:     make(http.Header),
+			}
+		}
+		if strings.Contains(req.URL.Path, "/subscribe") {
+			subscribeCalled = true
+			var body map[string]interface{}
+			json.NewDecoder(req.Body).Decode(&body)
+			if int(body["distanceRangeId"].(float64)) != 5 {
+				t.Errorf("expected distanceRangeId 5, got %v", body["distanceRangeId"])
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"success":true}`)),
+				Header:     make(http.Header),
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(bytes.NewBufferString(`{}`)),
+			Header:     make(http.Header),
+		}
+	})
+
+	h := newTestHandler(mockRT)
+	body := `{"distanceKm":"15.5","contactNumber":"+94771234567"}`
+	req := httptest.NewRequest(http.MethodPost, "/tools/subscribe_commute", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w := httptest.NewRecorder()
+	h.Tools(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Result().StatusCode)
+	}
+	if !subscribeCalled {
+		t.Fatalf("expected subscribe endpoint to be called")
+	}
+}
+
+func TestSubscribeCommuteMissingContactNumber(t *testing.T) {
+	h := newTestHandler(nil)
+	body := `{"distanceKm":15.0}`
+	req := httptest.NewRequest(http.MethodPost, "/tools/subscribe_commute", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w := httptest.NewRecorder()
+	h.Tools(w, req)
+
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing contact number, got %d", w.Result().StatusCode)
+	}
+	var res map[string]interface{}
+	json.NewDecoder(w.Result().Body).Decode(&res)
+	if !strings.Contains(fmt.Sprint(res["error"]), "contactNumber") {
+		t.Fatalf("expected contactNumber error message, got %v", res["error"])
+	}
+}
+
+func TestSubscribeCommuteOutOfRangeDistance(t *testing.T) {
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		if strings.Contains(req.URL.Path, "subscriptions/meta-info") {
+			metaJSON := `{"distances":[{"id":1,"minKm":1,"maxKm":10},{"id":2,"minKm":11,"maxKm":20}]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(metaJSON)),
+				Header:     make(http.Header),
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(bytes.NewBufferString(`{}`)),
+			Header:     make(http.Header),
+		}
+	})
+
+	h := newTestHandler(mockRT)
+	body := `{"distanceKm":99.0,"contactNumber":"+94771234567"}`
+	req := httptest.NewRequest(http.MethodPost, "/tools/subscribe_commute", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w := httptest.NewRecorder()
+	h.Tools(w, req)
+
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for out-of-range distance, got %d", w.Result().StatusCode)
+	}
+	var res map[string]interface{}
+	json.NewDecoder(w.Result().Body).Decode(&res)
+	if !strings.Contains(fmt.Sprint(res["error"]), "No commute plan covers") {
+		t.Fatalf("expected out-of-range error message, got %v", res["error"])
+	}
+}
+
+func TestSubscribeCommuteMetaInfoFailureReturns502(t *testing.T) {
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		if strings.Contains(req.URL.Path, "subscriptions/meta-info") {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"error":"db failure"}`)),
+				Header:     make(http.Header),
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(bytes.NewBufferString(`{}`)),
+			Header:     make(http.Header),
+		}
+	})
+
+	h := newTestHandler(mockRT)
+	body := `{"distanceKm":15.0,"contactNumber":"+94771234567"}`
+	req := httptest.NewRequest(http.MethodPost, "/tools/subscribe_commute", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w := httptest.NewRecorder()
+	h.Tools(w, req)
+
+	if w.Result().StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway when meta-info fails, got %d", w.Result().StatusCode)
 	}
 }

@@ -375,7 +375,18 @@ func (h *Handler) dispatchTool(
 		method = http.MethodPost
 		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/commutes/%s/subscribe", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
-		reqBody = h.buildCommutePayload(r.Context(), args, jwtToken)
+		var status int
+		var errMsg string
+		reqBody, status, errMsg = h.buildCommutePayload(r.Context(), args, jwtToken)
+		if errMsg != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   errMsg,
+			})
+			return
+		}
 
 	case "unsubscribe_commute":
 		method = http.MethodPost
@@ -402,6 +413,31 @@ func extractInt(args map[string]interface{}, keys ...string) (int, bool) {
 		case string:
 			clean := strings.TrimSpace(v)
 			if parsed, err := strconv.Atoi(clean); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func extractFloat(args map[string]interface{}, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		val, exists := args[key]
+		if !exists || val == nil {
+			continue
+		}
+		switch v := val.(type) {
+		case float64:
+			return v, true
+		case float32:
+			return float64(v), true
+		case int:
+			return float64(v), true
+		case int64:
+			return float64(v), true
+		case string:
+			clean := strings.TrimSpace(v)
+			if parsed, err := strconv.ParseFloat(clean, 64); err == nil {
 				return parsed, true
 			}
 		}
@@ -501,42 +537,66 @@ func (h *Handler) buildCommutePayload(
 	ctx context.Context,
 	args map[string]interface{},
 	jwtToken string,
-) []byte {
-	distKm := 0.0
-	if d, ok := args["distanceKm"].(float64); ok {
-		distKm = d
-	} else if d, ok := args["distance_km"].(float64); ok {
-		distKm = d
+) ([]byte, int, string) {
+	contactNumber := extractString(args, "contactNumber", "contact_number", "phone", "mobile")
+	if contactNumber == "" {
+		return nil, http.StatusBadRequest,
+			"Missing required parameter: contactNumber (Sri Lankan mobile number in format +947XXXXXXXX)."
 	}
 
-	contactNumber := ""
-	if c, ok := args["contactNumber"].(string); ok {
-		contactNumber = c
-	} else if c, ok := args["contact_number"].(string); ok {
-		contactNumber = c
-	}
+	distanceRangeID, _ := extractInt(args, "distanceRangeId", "distance_range_id")
+	if distanceRangeID <= 0 {
+		distKm, ok := extractFloat(args, "distanceKm", "distance_km")
+		if !ok || distKm <= 0 {
+			return nil, http.StatusBadRequest,
+				"Missing or invalid commute distance: distanceKm must be greater than 0."
+		}
 
-	distanceRangeID := 0
-	if id, ok := args["distanceRangeId"].(float64); ok {
-		distanceRangeID = int(id)
-	} else if distKm > 0 {
 		metaURL := fmt.Sprintf("%s/subscriptions/meta-info", h.cfg.SubscriptionBackendURL)
 		metaReq, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
-		if err == nil {
-			metaReq.Header.Set("Authorization", "Bearer "+jwtToken)
-			metaReq.Header.Set("x-jwt-assertion", jwtToken)
-			if metaResp, err := h.cfg.HTTPClient.Do(metaReq); err == nil {
-				defer metaResp.Body.Close()
-				var meta model.SubscriptionsMetaInfo
-				if err := json.NewDecoder(metaResp.Body).Decode(&meta); err == nil {
-					for _, d := range meta.Distances {
-						if int(distKm) >= d.MinKm && int(distKm) <= d.MaxKm {
-							distanceRangeID = d.ID
-							break
-						}
-					}
-				}
+		if err != nil {
+			return nil, http.StatusBadGateway,
+				"Failed to create request for subscription distance ranges: " + err.Error()
+		}
+		metaReq.Header.Set("Authorization", "Bearer "+jwtToken)
+		metaReq.Header.Set("x-jwt-assertion", jwtToken)
+
+		metaResp, err := h.cfg.HTTPClient.Do(metaReq)
+		if err != nil {
+			return nil, http.StatusBadGateway,
+				"Failed to reach subscription service to resolve distance range: " + err.Error()
+		}
+		defer metaResp.Body.Close()
+
+		if metaResp.StatusCode != http.StatusOK {
+			return nil, http.StatusBadGateway,
+				fmt.Sprintf("Subscription service returned HTTP %d when resolving distance range.", metaResp.StatusCode)
+		}
+
+		var meta model.SubscriptionsMetaInfo
+		if err := json.NewDecoder(metaResp.Body).Decode(&meta); err != nil {
+			return nil, http.StatusBadGateway,
+				"Failed to decode distance ranges from subscription service: " + err.Error()
+		}
+
+		for _, d := range meta.Distances {
+			if int(distKm) >= d.MinKm && int(distKm) <= d.MaxKm {
+				distanceRangeID = d.ID
+				break
 			}
+		}
+
+		if distanceRangeID <= 0 {
+			var ranges []string
+			for _, d := range meta.Distances {
+				ranges = append(ranges, fmt.Sprintf("%d-%d km", d.MinKm, d.MaxKm))
+			}
+			rangeList := strings.Join(ranges, ", ")
+			if rangeList == "" {
+				rangeList = "none configured"
+			}
+			return nil, http.StatusBadRequest,
+				fmt.Sprintf("No commute plan covers a distance of %g km. Available ranges: %s.", distKm, rangeList)
 		}
 	}
 
@@ -544,8 +604,11 @@ func (h *Handler) buildCommutePayload(
 		"distanceRangeId": distanceRangeID,
 		"contactNumber":   contactNumber,
 	}
-	b, _ := json.Marshal(payload)
-	return b
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, http.StatusInternalServerError, "Failed to encode commute subscription payload: " + err.Error()
+	}
+	return b, http.StatusOK, ""
 }
 
 func (h *Handler) proxyBackendRequest(
@@ -581,7 +644,7 @@ func (h *Handler) proxyBackendRequest(
 	req.Header.Set("x-jwt-assertion", jwtToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	slog.Info("Proxying tool to backend", "tool", toolName, "method", method, "url", targetURL)
+	slog.Info("Proxying tool to backend", "tool", toolName, "method", method, "host", req.URL.Host)
 	resp, err := h.cfg.HTTPClient.Do(req)
 	if err != nil {
 		slog.Error("Failed to reach backend", "tool", toolName, "error", err)
