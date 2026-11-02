@@ -8,4 +8,4 @@ endpoints:
     type: REST
     networkVisibilities:
       - Public
-    schemaFilePath: .choreo/openapi.yaml
+    schemaFilePath: openapi.yaml
