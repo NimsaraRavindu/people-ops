@@ -51,34 +51,37 @@ func GetLeaveBucket() model.BucketKit {
 3. For period type: single day -> one, multiple days -> multiple, half day -> half. If the user
    requests a half-day leave, ask whether it is for the morning (is_morning_leave: true) or
    afternoon (is_morning_leave: false).
-4. When collecting leave details, ask if the user has a comment to add. If yes, ask if it should be
-   public (visible to the vacation group) or private. If no comment, skip the visibility question.
-5. MANDATORY: As soon as leave details (start date, end date, leave type, period type) are collected,
-   you MUST invoke the 'validate_leave' tool immediately BEFORE asking for confirmation or displaying the summary.
-   Do NOT invoke 'validate_leave' again if the details have already been validated in this conversation.
-- If workingDays is 0, inform the user that the selected dates contain no working days (e.g. falls entirely
-  on weekends or public holidays).
-- If hasOverlap is true or an error occurs, inform the user of the conflict or error.
-- If validation succeeds, report the server-verified working days (e.g. "Your leave was verified:
-  [workingDays] working day(s) will be deducted.").
-6. Once 'validate_leave' succeeds, present a clear summary of the verified leave request (dates, leave type,
-   period type, and verified working days) and invoke 'submit_leave'. The system confirmation guardrail will
-   prompt the user for confirmation before executing the submission.
-7. To cancel a leave: call 'get_pending_leaves' to fetch cancellable leaves, show the list to the user with
+4. When collecting leave details, ask if the user has a comment to add (plain text up to 1000 characters, no URLs).
+   If yes, ask if it should be public (visible to the vacation group) or private. If no comment, skip the visibility
+   question.
+5. MANDATORY LEAVE VALIDATION & SUBMISSION FLOW:
+   - As soon as leave details (start date, end date, leave type, period type) are collected, you MUST invoke
+     the 'validate_leave' tool immediately.
+   - Do NOT invoke 'validate_leave' again if the details have already been validated in this conversation.
+   - If workingDays is 0, inform the user that the selected dates contain no working days (e.g. falls entirely
+     on weekends or public holidays).
+   - If hasOverlap is true or an error occurs, inform the user of the conflict or error.
+   - Once 'validate_leave' succeeds, report verified working days and immediately invoke 'submit_leave' in the
+     SAME turn while asking the user if they'd like to proceed.
+   - CRITICAL: Do NOT ask for confirmation in plain text before invoking 'submit_leave'. 'submit_leave' is safely
+     intercepted by the system guardrail and will NOT execute until the user confirms. If you ask in text first
+     without invoking 'submit_leave', the user will be forced to confirm twice!
+6. To cancel a leave: call 'get_pending_leaves' to fetch cancellable leaves, show the list to the user with
    dates and leave type (do NOT show numeric database IDs). When the user identifies which leave to cancel,
-   invoke 'cancel_leave'. The system confirmation guardrail will prompt the user for confirmation before executing.
-8. When showing leave history: call 'get_leave_history'. Display the results in a clean point-wise list
+   invoke 'cancel_leave' immediately in the SAME turn. Do NOT stop to ask for confirmation in plain text before
+   calling 'cancel_leave' — the system guardrail handles the confirmation safely.
+7. When showing leave history: call 'get_leave_history'. Display the results in a clean point-wise list
    (NEVER use markdown tables). NEVER use asterisks (* or **) for bolding or italics. For each leave record,
    format cleanly as: "• <Leave Type> — <Start Date> to <End Date> (<Duration> day(s), <Period Type>) - <Status>".
    If a comment is present, include it indented below. Do NOT show numeric database IDs.
-9. If the user says "cancel" or "no", abandon the current action and confirm it was cancelled.
-10. If the user wants to book manually or encounters an error, provide this link:
-    [One WSO2 Leave](https://one.wso2.com/me/leave)
-11. For read-only queries (viewing leave history, balances, or pending leaves), call the relevant tool
+8. If the user says "cancel" or "no", abandon the current action and confirm it was cancelled.
+9. If the user wants to book manually or encounters an error, provide this link:
+   [One WSO2 Leave](https://one.wso2.com/me/leave)
+10. For read-only queries (viewing leave history, balances, or pending leaves), call the relevant tool
     immediately without asking for confirmation first.
-12. When the user asks for their leave balance, remaining leave, or entitlement (e.g. 'How many casual leaves
+11. When the user asks for their leave balance, remaining leave, or entitlement (e.g. 'How many casual leaves
     do I have left?'), call 'get_leave_balance' immediately without asking for confirmation.
-13. If the user only says "leave" or gives an open-ended request without specifying an action, respond warmly
+12. If the user only says "leave" or gives an open-ended request without specifying an action, respond warmly
     and present available actions point-wise with quick examples (e.g. "• Check Balance — e.g., 'How many
     annual leaves do I have left?'", "• Apply for Leave — e.g., 'Take casual leave this Friday'",
     "• View or Cancel — e.g., 'Show my pending leaves'"). Do NOT use sterile numbered menus or asterisks (* or **).
@@ -109,7 +112,7 @@ Be concise and friendly. Use plain text only (no markdown asterisks).`,
 						},
 						"comment": {
 							Type:        "string",
-							Description: "Optional comment to include with notification",
+							Description: "Optional comment to include with notification (max 1000 characters, no URLs)",
 						},
 						"is_public_comment": {
 							Type:        "boolean",
@@ -160,7 +163,7 @@ Be concise and friendly. Use plain text only (no markdown asterisks).`,
 						},
 						"comment": {
 							Type:        "string",
-							Description: "Optional comment to include with notification",
+							Description: "Optional comment to include with notification (max 1000 characters, no URLs)",
 						},
 						"is_public_comment": {
 							Type:        "boolean",
@@ -193,9 +196,14 @@ Be concise and friendly. Use plain text only (no markdown asterisks).`,
 				Description: "Read-only. Fetch the employee's current pending and approved leaves eligible for cancellation. " +
 					"Call immediately as part of the cancel flow — do not ask for confirmation before calling this.",
 				InputSchema: model.InputSchema{
-					Type:       "object",
-					Properties: map[string]model.ToolProperty{},
-					Required:   []string{},
+					Type: "object",
+					Properties: map[string]model.ToolProperty{
+						"timezone": {
+							Type:        "string",
+							Description: "Optional user IANA timezone (e.g. 'America/New_York', 'Europe/London')",
+						},
+					},
+					Required: []string{},
 				},
 				ReadOnly:             true,
 				RequiresConfirmation: false,

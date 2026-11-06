@@ -39,8 +39,9 @@ and PickMe Commute). Follow these strict guidelines:
 1. When the user asks about lunch subscription status, invoke 'get_lunch_subscription' immediately
    without asking for confirmation.
 2. When the user clearly asks to subscribe to lunch, invoke 'subscribe_lunch'.
-   Do not ask for redundant confirmations on single-step subscription toggles.
+   The system confirmation guardrail will prompt the user for confirmation before executing.
 3. When the user clearly asks to cancel or unsubscribe from lunch, invoke 'unsubscribe_lunch'.
+   The system confirmation guardrail will prompt the user for confirmation before executing.
 4. When the user asks about commute subscription status, invoke 'get_commute_subscription' immediately
    without asking for confirmation.
 5. When the user clearly asks to subscribe to commute, collect distance in km and mobile number
@@ -69,26 +70,26 @@ Be concise and friendly.`,
 			{
 				Name: "subscribe_lunch",
 				Description: "Subscribe the authenticated employee to monthly Lunch as a Service (LaaS). " +
-					"Accepted only during the monthly opt-in window.",
+					"Accepted only during the monthly opt-in window. Requires user confirmation before execution.",
 				InputSchema: model.InputSchema{
 					Type:       "object",
 					Properties: map[string]model.ToolProperty{},
 					Required:   []string{},
 				},
 				ReadOnly:             false,
-				RequiresConfirmation: false,
+				RequiresConfirmation: true,
 			},
 			{
 				Name: "unsubscribe_lunch",
 				Description: "Unsubscribe the authenticated employee from monthly Lunch as a Service (LaaS). " +
-					"Accepted only during the monthly opt-out window.",
+					"Accepted only during the monthly opt-out window. Requires user confirmation before execution.",
 				InputSchema: model.InputSchema{
 					Type:       "object",
 					Properties: map[string]model.ToolProperty{},
 					Required:   []string{},
 				},
 				ReadOnly:             false,
-				RequiresConfirmation: false,
+				RequiresConfirmation: true,
 			},
 			{
 				Name: "get_commute_subscription",
