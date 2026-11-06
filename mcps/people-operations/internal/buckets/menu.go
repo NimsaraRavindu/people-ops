@@ -35,7 +35,7 @@ func GetMenuBucket() model.BucketKit {
    invoke 'get_menu' immediately without asking for confirmation.
 2. When the user shares feedback, reviews, or comments about today's lunch, present a brief summary and invoke
    'submit_lunch_feedback' directly. Note that lunch feedback is only accepted during the lunch window (12:00 to 16:15
-   Sri Lanka time).
+   Sri Lanka time), must not contain URLs, and cannot exceed 1000 characters.
 3. If the user says "cancel" or "no", abandon the action and confirm it was cancelled.
 4. If the user asks for the cafeteria portal link, or wants to view menus or place dinner orders on the web,
    provide this link: [One WSO2 Cafeteria](https://one.wso2.com/me/menu)
@@ -65,7 +65,7 @@ Be concise and friendly.`,
 					Properties: map[string]model.ToolProperty{
 						"message": {
 							Type:        "string",
-							Description: "The feedback message or review about today's lunch",
+							Description: "The feedback message or review about today's lunch (max 1000 characters, no URLs)",
 						},
 					},
 					Required: []string{"message"},

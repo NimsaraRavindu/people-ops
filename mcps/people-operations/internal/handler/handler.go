@@ -37,6 +37,32 @@ import (
 
 var validToolNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+const maxFreeTextLength = 1000
+
+var urlRegex = regexp.MustCompile(`(?i)(https?://|ftp://|www\.)[^\s]+`)
+
+// validateFreeTextField enforces maximum character length and disallows hyperlinks to prevent phishing and injection.
+func validateFreeTextField(val interface{}, fieldName string) error {
+	if val == nil {
+		return nil
+	}
+	s, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("%s must be a string", fieldName)
+	}
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil
+	}
+	if len([]rune(trimmed)) > maxFreeTextLength {
+		return fmt.Errorf("%s exceeds maximum allowed length of %d characters", fieldName, maxFreeTextLength)
+	}
+	if urlRegex.MatchString(trimmed) {
+		return fmt.Errorf("%s must not contain hyperlinks or URLs", fieldName)
+	}
+	return nil
+}
+
 var colomboLocation *time.Location
 
 func init() {
@@ -173,11 +199,15 @@ func (h *Handler) dispatchTool(
 	args map[string]interface{},
 	jwtToken string,
 ) {
-	// Guard: check user email extraction for employee-scoped tools to avoid double-slash 404s
+	// Guard: verify token and extract user identity for employee-scoped and write tools
 	userScopedTools := map[string]bool{
 		"get_leave_history":        true,
 		"get_pending_leaves":       true,
 		"get_leave_balance":        true,
+		"cancel_leave":             true,
+		"submit_leave":             true,
+		"validate_leave":           true,
+		"submit_lunch_feedback":    true,
 		"get_vehicles":             true,
 		"add_vehicle":              true,
 		"delete_vehicle":           true,
@@ -190,8 +220,9 @@ func (h *Handler) dispatchTool(
 		"subscribe_commute":        true,
 		"unsubscribe_commute":      true,
 	}
+	var userEmail string
 	if userScopedTools[toolName] {
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
+		userEmail = auth.ExtractEmailFromJWT(jwtToken)
 		if userEmail == "" {
 			slog.Warn("Rejected request: unable to extract employee email from token", "tool", toolName)
 			w.Header().Set("Content-Type", "application/json")
@@ -217,18 +248,35 @@ func (h *Handler) dispatchTool(
 			h.cfg.LeaveBackendURL, url.QueryEscape(startDate), url.QueryEscape(endDate))
 
 	case "validate_leave":
+		if err := validateFreeTextField(args["comment"], "Leave comment"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
 		method = http.MethodPost
 		targetURL = fmt.Sprintf("%s/leaves?isValidationOnlyMode=true", h.cfg.LeaveBackendURL)
 		reqBody = buildLeavePayload(args, true)
 
 	case "submit_leave":
+		if err := validateFreeTextField(args["comment"], "Leave comment"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
 		method = http.MethodPost
 		targetURL = fmt.Sprintf("%s/leaves?isValidationOnlyMode=false", h.cfg.LeaveBackendURL)
 		reqBody = buildLeavePayload(args, false)
 
 	case "get_leave_history":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf(
 			"%s/leaves?email=%s&statuses=PENDING&statuses=APPROVED&statuses=CANCELLED&orderBy=DESC&limit=20",
 			h.cfg.LeaveBackendURL, url.QueryEscape(userEmail),
@@ -242,13 +290,11 @@ func (h *Handler) dispatchTool(
 
 	case "get_pending_leaves":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/leaves?email=%s&statuses=PENDING&statuses=APPROVED",
 			h.cfg.LeaveBackendURL, url.QueryEscape(userEmail))
 
 	case "get_leave_balance":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/employees/%s/leave-entitlement",
 			h.cfg.LeaveBackendURL, url.PathEscape(userEmail))
 
@@ -268,7 +314,6 @@ func (h *Handler) dispatchTool(
 
 	case "get_vehicles":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/employees/%s/vehicles", h.cfg.PeopleBackendURL, url.PathEscape(userEmail))
 		params := url.Values{}
 		if vs := extractString(args, "vehicleStatus", "vehicle_status", "status"); vs != "" {
@@ -286,7 +331,6 @@ func (h *Handler) dispatchTool(
 
 	case "add_vehicle":
 		method = http.MethodPost
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/employees/%s/vehicles", h.cfg.PeopleBackendURL, url.PathEscape(userEmail))
 		regNum := extractString(args, "vehicleRegistrationNumber", "vehicle_registration_number")
 		vType := strings.ToUpper(extractString(args, "vehicleType", "vehicle_type"))
@@ -307,7 +351,6 @@ func (h *Handler) dispatchTool(
 
 	case "delete_vehicle":
 		method = http.MethodDelete
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		vehicleID, ok := extractInt(args, "vehicleId", "vehicle_id", "id")
 		if !ok || vehicleID <= 0 {
 			w.Header().Set("Content-Type", "application/json")
@@ -325,12 +368,10 @@ func (h *Handler) dispatchTool(
 
 	case "get_my_location":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/employees/%s", h.cfg.LeaveBackendURL, url.PathEscape(userEmail))
 
 	case "fetch_leads":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/employees/%s", h.cfg.LeaveBackendURL, url.PathEscape(userEmail))
 
 	case "get_letter_request_form":
@@ -342,9 +383,27 @@ func (h *Handler) dispatchTool(
 		targetURL = fmt.Sprintf("%s/menu", h.cfg.MenuBackendURL)
 
 	case "submit_lunch_feedback":
+		msg, _ := args["message"].(string)
+		if strings.TrimSpace(msg) == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Missing or empty required parameter: message.",
+			})
+			return
+		}
+		if err := validateFreeTextField(msg, "Feedback message"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
 		method = http.MethodPost
 		targetURL = fmt.Sprintf("%s/feedback", h.cfg.MenuBackendURL)
-		msg, _ := args["message"].(string)
 		feedbackPayload := map[string]interface{}{
 			"message": msg,
 			"meal":    "Lunch",
@@ -353,27 +412,22 @@ func (h *Handler) dispatchTool(
 
 	case "get_lunch_subscription":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/meal/%s", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 
 	case "subscribe_lunch":
 		method = http.MethodPost
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/meal/%s/subscribe", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 
 	case "unsubscribe_lunch":
 		method = http.MethodPost
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/meal/%s/unsubscribe", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 
 	case "get_commute_subscription":
 		method = http.MethodGet
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/commutes/%s", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 
 	case "subscribe_commute":
 		method = http.MethodPost
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/commutes/%s/subscribe", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 		var status int
 		var errMsg string
@@ -390,11 +444,10 @@ func (h *Handler) dispatchTool(
 
 	case "unsubscribe_commute":
 		method = http.MethodPost
-		userEmail := auth.ExtractEmailFromJWT(jwtToken)
 		targetURL = fmt.Sprintf("%s/commutes/%s/unsubscribe", h.cfg.SubscriptionBackendURL, url.PathEscape(userEmail))
 	}
 
-	h.proxyBackendRequest(r.Context(), w, toolName, method, targetURL, reqBody, jwtToken, args)
+	h.proxyBackendRequest(w, r, toolName, method, targetURL, reqBody, jwtToken, args)
 }
 
 func extractInt(args map[string]interface{}, keys ...string) (int, bool) {
@@ -612,8 +665,8 @@ func (h *Handler) buildCommutePayload(
 }
 
 func (h *Handler) proxyBackendRequest(
-	ctx context.Context,
 	w http.ResponseWriter,
+	r *http.Request,
 	toolName string,
 	method string,
 	targetURL string,
@@ -624,9 +677,9 @@ func (h *Handler) proxyBackendRequest(
 	var req *http.Request
 	var reqErr error
 	if len(reqBody) > 0 {
-		req, reqErr = http.NewRequestWithContext(ctx, method, targetURL, bytes.NewBuffer(reqBody))
+		req, reqErr = http.NewRequestWithContext(r.Context(), method, targetURL, bytes.NewBuffer(reqBody))
 	} else {
-		req, reqErr = http.NewRequestWithContext(ctx, method, targetURL, nil)
+		req, reqErr = http.NewRequestWithContext(r.Context(), method, targetURL, nil)
 	}
 	if reqErr != nil {
 		slog.Error("Failed to create backend request", "tool", toolName, "error", reqErr)
@@ -667,7 +720,7 @@ func (h *Handler) proxyBackendRequest(
 	}
 
 	if toolName == "get_pending_leaves" && resp.StatusCode == http.StatusOK {
-		h.formatPendingLeavesResponse(w, resp.Body)
+		h.formatPendingLeavesResponse(w, r, args, resp.Body)
 		return
 	}
 
@@ -936,7 +989,52 @@ func (h *Handler) formatLeaveBalanceResponse(w http.ResponseWriter, body io.Read
 	w.Write(bodyBytes)
 }
 
-func (h *Handler) formatPendingLeavesResponse(w http.ResponseWriter, body io.Reader) {
+// resolveUserLocation resolves the caller's timezone from HTTP headers, tool arguments, or default fallbacks.
+func resolveUserLocation(r *http.Request, args map[string]interface{}) *time.Location {
+	tzHeaders := []string{"X-User-Timezone", "X-Timezone", "Time-Zone"}
+	for _, h := range tzHeaders {
+		if r != nil {
+			if val := strings.TrimSpace(r.Header.Get(h)); val != "" {
+				if loc, err := time.LoadLocation(val); err == nil {
+					return loc
+				}
+			}
+		}
+	}
+	if args != nil {
+		for _, key := range []string{"timezone", "user_tz", "timeZone"} {
+			if val, ok := args[key].(string); ok && strings.TrimSpace(val) != "" {
+				if loc, err := time.LoadLocation(strings.TrimSpace(val)); err == nil {
+					return loc
+				}
+			}
+		}
+	}
+	if colomboLocation != nil {
+		return colomboLocation
+	}
+	return time.UTC
+}
+
+// resolveUserToday returns the current date (YYYY-MM-DD) evaluated in the caller's timezone.
+func resolveUserToday(r *http.Request, args map[string]interface{}) string {
+	if args != nil {
+		for _, key := range []string{"current_date", "today", "client_date"} {
+			if val, ok := args[key].(string); ok && len(val) >= 10 {
+				return val[:10]
+			}
+		}
+	}
+	loc := resolveUserLocation(r, args)
+	return time.Now().In(loc).Format("2006-01-02")
+}
+
+func (h *Handler) formatPendingLeavesResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	args map[string]interface{},
+	body io.Reader,
+) {
 	var rawResp struct {
 		Leaves []struct {
 			ID            int64   `json:"id"`
@@ -951,11 +1049,7 @@ func (h *Handler) formatPendingLeavesResponse(w http.ResponseWriter, body io.Rea
 	}
 	bodyBytes, err := io.ReadAll(body)
 	if err == nil && json.Unmarshal(bodyBytes, &rawResp) == nil {
-		now := time.Now()
-		if colomboLocation != nil {
-			now = now.In(colomboLocation)
-		}
-		todayStr := now.Format("2006-01-02")
+		todayStr := resolveUserToday(r, args)
 		cancellable := []interface{}{}
 
 		for _, l := range rawResp.Leaves {

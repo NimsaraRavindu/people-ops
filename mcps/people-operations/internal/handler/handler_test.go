@@ -157,10 +157,11 @@ func TestLeaveToolTokenRelay(t *testing.T) {
 		}
 	})
 
+	testJWT := validTestJWT()
 	h := newTestHandler(mockRT)
 	payload := `{"start_date":"2026-11-01","end_date":"2026-11-01","leave_type":"casual","period_type":"one"}`
 	req := httptest.NewRequest(http.MethodPost, "/tools/validate_leave", bytes.NewBufferString(payload))
-	req.Header.Set("Authorization", "Bearer my-secret-user-token")
+	req.Header.Set("Authorization", "Bearer "+testJWT)
 	w := httptest.NewRecorder()
 
 	h.Tools(w, req)
@@ -169,14 +170,72 @@ func TestLeaveToolTokenRelay(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
 	}
 
-	if capturedAuth != "Bearer my-secret-user-token" {
+	if capturedAuth != "Bearer "+testJWT {
 		t.Fatalf("expected relayed Authorization header, got %s", capturedAuth)
 	}
-	if capturedAssertion != "my-secret-user-token" {
+	if capturedAssertion != testJWT {
 		t.Fatalf("expected relayed x-jwt-assertion header, got %s", capturedAssertion)
 	}
 	if capturedURL != "https://mock-leave.example.com/leaves?isValidationOnlyMode=true" {
 		t.Fatalf("unexpected target URL: %s", capturedURL)
+	}
+}
+
+func TestUnverifiedTokenRejectedForSensitiveTools(t *testing.T) {
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		t.Fatal("downstream service should NOT be called when token is unverified")
+		return nil
+	})
+	h := newTestHandler(mockRT)
+
+	// Insecure alg: "none" token
+	noneHeader := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"attacker@wso2.com","groups":["peopleOpsTeam"]}`))
+	forgedNoneToken := noneHeader + "." + payload + "."
+
+	toolsToTest := []struct {
+		name string
+		tool string
+		body string
+	}{
+		{
+			name: "cancel_leave rejects unverified token",
+			tool: "cancel_leave",
+			body: `{"leave_id": 123}`,
+		},
+		{
+			name: "submit_leave rejects unverified token",
+			tool: "submit_leave",
+			body: `{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual","period_type":"one"}`,
+		},
+		{
+			name: "validate_leave rejects unverified token",
+			tool: "validate_leave",
+			body: `{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual","period_type":"one"}`,
+		},
+		{
+			name: "submit_lunch_feedback rejects unverified token",
+			tool: "submit_lunch_feedback",
+			body: `{"message":"Great lunch"}`,
+		},
+	}
+
+	for _, tc := range toolsToTest {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/tools/"+tc.tool,
+				bytes.NewBufferString(tc.body),
+			)
+			req.Header.Set("Authorization", "Bearer "+forgedNoneToken)
+			w := httptest.NewRecorder()
+			h.Tools(w, req)
+
+			if w.Result().StatusCode != http.StatusUnauthorized {
+				t.Fatalf("expected 401 Unauthorized for tool %s with unverified token, got %d",
+					tc.tool, w.Result().StatusCode)
+			}
+		})
 	}
 }
 
@@ -399,6 +458,69 @@ func TestGetPendingLeavesFiltersPastApproved(t *testing.T) {
 	}
 	if res.Leaves[0].ID != 2 || res.Leaves[1].ID != 3 {
 		t.Fatalf("expected leaves [2, 3], got %+v", res.Leaves)
+	}
+}
+
+func TestGetPendingLeavesTimezoneSupport(t *testing.T) {
+	mockBackendResp := `{
+		"leaves": [
+			{
+				"id": 10,
+				"leaveType": "annual",
+				"startDate": "2026-06-15 00:00:00.0",
+				"endDate": "2026-06-15 23:59:00.0",
+				"status": "APPROVED"
+			}
+		]
+	}`
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(mockBackendResp)),
+			Header:     make(http.Header),
+		}
+	})
+	h := newTestHandler(mockRT)
+
+	// 1. With current_date before endDate -> leave is included
+	body1 := `{"current_date":"2026-06-14"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/tools/get_pending_leaves", bytes.NewBufferString(body1))
+	req1.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w1 := httptest.NewRecorder()
+	h.Tools(w1, req1)
+	if w1.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w1.Result().StatusCode)
+	}
+	var res1 struct {
+		Count int `json:"count"`
+	}
+	json.NewDecoder(w1.Body).Decode(&res1)
+	if res1.Count != 1 {
+		t.Fatalf("expected 1 leave when current_date is before endDate, got %d", res1.Count)
+	}
+
+	// 2. With current_date after endDate -> leave is filtered out
+	body2 := `{"current_date":"2026-06-16"}`
+	req2 := httptest.NewRequest(http.MethodPost, "/tools/get_pending_leaves", bytes.NewBufferString(body2))
+	req2.Header.Set("Authorization", "Bearer "+validTestJWT())
+	w2 := httptest.NewRecorder()
+	h.Tools(w2, req2)
+	var res2 struct {
+		Count int `json:"count"`
+	}
+	json.NewDecoder(w2.Body).Decode(&res2)
+	if res2.Count != 0 {
+		t.Fatalf("expected 0 leaves when current_date is past endDate, got %d", res2.Count)
+	}
+
+	// 3. With X-User-Timezone header
+	req3 := httptest.NewRequest(http.MethodPost, "/tools/get_pending_leaves", bytes.NewBufferString(`{}`))
+	req3.Header.Set("Authorization", "Bearer "+validTestJWT())
+	req3.Header.Set("X-User-Timezone", "America/New_York")
+	w3 := httptest.NewRecorder()
+	h.Tools(w3, req3)
+	if w3.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with X-User-Timezone, got %d", w3.Result().StatusCode)
 	}
 }
 
@@ -699,5 +821,149 @@ func TestSubscribeCommuteMetaInfoFailureReturns502(t *testing.T) {
 
 	if w.Result().StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected 502 Bad Gateway when meta-info fails, got %d", w.Result().StatusCode)
+	}
+}
+
+func TestSubmitLunchFeedbackValidation(t *testing.T) {
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"success":true}`)),
+			Header:     make(http.Header),
+		}
+	})
+	h := newTestHandler(mockRT)
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		errSubstr  string
+	}{
+		{
+			name:       "empty message rejected",
+			body:       `{"message":""}`,
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "Missing or empty required parameter",
+		},
+		{
+			name: "message exceeding 1000 characters rejected",
+			body: fmt.Sprintf(
+				`{"message":"%s"}`,
+				strings.Repeat("A", 1001),
+			),
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "exceeds maximum allowed length",
+		},
+		{
+			name:       "message containing https url rejected",
+			body:       `{"message":"Great food check https://evil.com/phish"}`,
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "must not contain hyperlinks or URLs",
+		},
+		{
+			name:       "message containing www url rejected",
+			body:       `{"message":"Great food www.malicious.com"}`,
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "must not contain hyperlinks or URLs",
+		},
+		{
+			name:       "valid feedback message accepted",
+			body:       `{"message":"The lunch today was fantastic, loved the curry!"}`,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/tools/submit_lunch_feedback",
+				bytes.NewBufferString(tt.body),
+			)
+			req.Header.Set("Authorization", "Bearer "+validTestJWT())
+			w := httptest.NewRecorder()
+			h.Tools(w, req)
+
+			if w.Result().StatusCode != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d. Body: %s", tt.wantStatus, w.Result().StatusCode, w.Body.String())
+			}
+			if tt.errSubstr != "" && !strings.Contains(w.Body.String(), tt.errSubstr) {
+				t.Fatalf("expected error body to contain %q, got %s", tt.errSubstr, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestLeaveCommentValidation(t *testing.T) {
+	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"success":true}`)),
+			Header:     make(http.Header),
+		}
+	})
+	h := newTestHandler(mockRT)
+
+	tests := []struct {
+		name       string
+		tool       string
+		body       string
+		wantStatus int
+		errSubstr  string
+	}{
+		{
+			name: "leave comment exceeding 1000 characters rejected in submit_leave",
+			tool: "submit_leave",
+			body: fmt.Sprintf(
+				`{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual","period_type":"one","comment":"%s"}`,
+				strings.Repeat("B", 1001),
+			),
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "exceeds maximum allowed length",
+		},
+		{
+			name: "leave comment with URL rejected in submit_leave",
+			tool: "submit_leave",
+			body: `{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual",` +
+				`"period_type":"one","comment":"Taking leave see http://phishing.site"}`,
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "must not contain hyperlinks or URLs",
+		},
+		{
+			name: "leave comment with URL rejected in validate_leave",
+			tool: "validate_leave",
+			body: `{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual",` +
+				`"period_type":"one","comment":"See https://phishing.site"}`,
+			wantStatus: http.StatusBadRequest,
+			errSubstr:  "must not contain hyperlinks or URLs",
+		},
+		{
+			name: "valid leave comment accepted",
+			tool: "submit_leave",
+			body: `{"start_date":"2026-12-01","end_date":"2026-12-01","leave_type":"casual",` +
+				`"period_type":"one","comment":"Family event"}`,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/tools/"+tt.tool,
+				bytes.NewBufferString(tt.body),
+			)
+			req.Header.Set("Authorization", "Bearer "+validTestJWT())
+			w := httptest.NewRecorder()
+			h.Tools(w, req)
+
+			if w.Result().StatusCode != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d. Body: %s", tt.wantStatus, w.Result().StatusCode, w.Body.String())
+			}
+			if tt.errSubstr != "" && !strings.Contains(w.Body.String(), tt.errSubstr) {
+				t.Fatalf("expected error body to contain %q, got %s", tt.errSubstr, w.Body.String())
+			}
+		})
 	}
 }

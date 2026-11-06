@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func createMockToken(claims map[string]interface{}) string {
@@ -86,5 +87,90 @@ func TestExtractEmailInvalidTokenReturnsEmpty(t *testing.T) {
 	}
 	if email := ExtractEmailFromJWT(""); email != "" {
 		t.Fatalf("expected empty string for empty token, got %s", email)
+	}
+}
+
+func TestExtractEmailSecurityChecks(t *testing.T) {
+	// 1. Insecure alg: "none"
+	noneHeader := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"victim@wso2.com"}`))
+	unsignedNone := noneHeader + "." + payload + "."
+	if em := ExtractEmailFromJWT(unsignedNone); em != "" {
+		t.Fatalf("expected alg: none to be rejected, got %s", em)
+	}
+
+	// 2. Missing signature (2 parts only)
+	twoParts := noneHeader + "." + payload
+	if em := ExtractEmailFromJWT(twoParts); em != "" {
+		t.Fatalf("expected 2-part token to be rejected, got %s", em)
+	}
+
+	// 3. Empty signature segment with valid alg
+	rsHeader := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	emptySig := rsHeader + "." + payload + "."
+	if em := ExtractEmailFromJWT(emptySig); em != "" {
+		t.Fatalf("expected empty signature to be rejected, got %s", em)
+	}
+
+	// 4. Expired token
+	expiredPayload := base64.RawURLEncoding.EncodeToString(
+		[]byte(`{"email":"victim@wso2.com","exp":1000000000}`),
+	)
+	expiredToken := rsHeader + "." + expiredPayload + ".mock-sig"
+	if em := ExtractEmailFromJWT(expiredToken); em != "" {
+		t.Fatalf("expected expired token to be rejected, got %s", em)
+	}
+
+	// 5. Symmetric algorithm HS256 rejected
+	hsHeader := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	hsToken := hsHeader + "." + payload + ".mock-sig"
+	if em := ExtractEmailFromJWT(hsToken); em != "" {
+		t.Fatalf("expected HS256 to be rejected, got %s", em)
+	}
+}
+
+func TestGetPublicKeyUnknownKidThrottled(t *testing.T) {
+	jwksCacheLock.Lock()
+	lastJWKSFetch = time.Now()
+	jwksCacheLock.Unlock()
+
+	_, err := getPublicKey("https://example.com/oauth2/jwks", "unknown-kid-xyz")
+	if err == nil {
+		t.Fatal("expected error for unknown kid during cooldown, got nil")
+	}
+}
+
+func TestExtractEmailFailsClosedWhenJWKSUnsetInProduction(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "production")
+	t.Setenv("ASGARDEO_JWKS_URL", "")
+	t.Setenv("CHOREO_JWKS_URL", "")
+
+	token := createMockToken(map[string]interface{}{
+		"email": "victim@wso2.com",
+	})
+	if em := ExtractEmailFromJWT(token); em != "" {
+		t.Fatalf("expected fail-closed rejection in production with missing JWKS, got %s", em)
+	}
+}
+
+func TestExtractEmailProductionOverridesValidatorDisabled(t *testing.T) {
+	t.Setenv("ENV", "production")
+	t.Setenv("TOKEN_VALIDATOR_ENABLED", "false")
+	t.Setenv("ASGARDEO_JWKS_URL", "")
+
+	token := createMockToken(map[string]interface{}{
+		"email": "victim@wso2.com",
+	})
+	if em := ExtractEmailFromJWT(token); em != "" {
+		t.Fatalf("expected production to mandate verification and fail-closed, got %s", em)
+	}
+}
+
+func TestResolveTokenRejectsDevStagingInProduction(t *testing.T) {
+	t.Setenv("ENV", "production")
+	t.Setenv("DEV_STAGING_TOKEN", "mock-secret-token")
+
+	if tok := ResolveToken(""); tok != "" {
+		t.Fatalf("expected ResolveToken to reject DEV_STAGING_TOKEN in production, got %s", tok)
 	}
 }
