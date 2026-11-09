@@ -141,7 +141,6 @@ func TestExtractEmailSecurityChecks(t *testing.T) {
 
 func TestExtractEmailFailsClosedWhenJWKSUnsetInProduction(t *testing.T) {
 	t.Setenv("ENVIRONMENT", "production")
-	t.Setenv("ASGARDEO_JWKS_URL", "")
 	t.Setenv("CHOREO_JWKS_URL", "")
 
 	token := createMockToken(map[string]interface{}{
@@ -155,7 +154,7 @@ func TestExtractEmailFailsClosedWhenJWKSUnsetInProduction(t *testing.T) {
 func TestExtractEmailProductionOverridesValidatorDisabled(t *testing.T) {
 	t.Setenv("ENV", "production")
 	t.Setenv("TOKEN_VALIDATOR_ENABLED", "false")
-	t.Setenv("ASGARDEO_JWKS_URL", "")
+	t.Setenv("CHOREO_JWKS_URL", "")
 
 	token := createMockToken(map[string]interface{}{
 		"email": "victim@wso2.com",
@@ -529,7 +528,6 @@ func TestEnvironmentPolicyQAAndUnrecognizedRequireVerification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ENVIRONMENT", tc.env)
 			t.Setenv("TOKEN_VALIDATOR_ENABLED", "false")
-			t.Setenv("ASGARDEO_JWKS_URL", "")
 			t.Setenv("CHOREO_JWKS_URL", "")
 			t.Setenv("DEV_STAGING_TOKEN", "mock-staging-secret")
 
@@ -552,7 +550,6 @@ func TestEnvironmentPolicyUnsetEnvironmentDefaultDeny(t *testing.T) {
 	t.Setenv("APP_ENV", "")
 	t.Setenv("FORCE_NON_DEV_ENV", "true")
 	t.Setenv("TOKEN_VALIDATOR_ENABLED", "false")
-	t.Setenv("ASGARDEO_JWKS_URL", "")
 	t.Setenv("CHOREO_JWKS_URL", "")
 	t.Setenv("DEV_STAGING_TOKEN", "mock-staging-secret")
 
@@ -591,7 +588,7 @@ func TestExtractEmailForgedTokenWithConfiguredJWKSRejected(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("ENVIRONMENT", "production")
-	t.Setenv("ASGARDEO_JWKS_URL", server.URL)
+	t.Setenv("CHOREO_JWKS_URL", server.URL)
 
 	// Attacker creates a token signed with attackerKey but referencing "trusted-kid"
 	forgedToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{

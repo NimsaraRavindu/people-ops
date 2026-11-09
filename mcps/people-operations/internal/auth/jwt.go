@@ -385,12 +385,9 @@ func ExtractEmailFromJWT(ctx context.Context, tokenStr string) string {
 
 	// 3. Cryptographic Signature Verification
 	if isTokenValidatorEnabled() {
-		jwksURL := strings.TrimSpace(os.Getenv("ASGARDEO_JWKS_URL"))
+		jwksURL := strings.TrimSpace(os.Getenv("CHOREO_JWKS_URL"))
 		if jwksURL == "" {
-			jwksURL = strings.TrimSpace(os.Getenv("CHOREO_JWKS_URL"))
-		}
-		if jwksURL == "" {
-			slog.Error("Rejected JWT: token verification required but neither ASGARDEO_JWKS_URL nor CHOREO_JWKS_URL set")
+			slog.Error("Rejected JWT: token verification required but CHOREO_JWKS_URL is not set")
 			return ""
 		}
 
