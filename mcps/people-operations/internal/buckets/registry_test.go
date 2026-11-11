@@ -62,6 +62,8 @@ func TestGetTool(t *testing.T) {
 		{"get_menu", true, false},
 		{"submit_lunch_feedback", false, true},
 		{"subscribe_commute", false, true},
+		{"subscribe_lunch", false, true},
+		{"unsubscribe_lunch", false, true},
 	}
 
 	for _, tt := range expectedTools {

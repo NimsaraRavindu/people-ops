@@ -8,6 +8,7 @@ paths:
     get:
       summary: Health check endpoint
       description: Returns service health status.
+      security: []
       responses:
         "200":
           description: Service is healthy
@@ -24,6 +25,7 @@ paths:
     get:
       summary: Discover and register MCP tool buckets
       description: Returns active BucketKit definitions for People Operations tools.
+      security: []
       responses:
         "200":
           description: List of registered BucketKits
@@ -72,6 +74,8 @@ paths:
     post:
       summary: Execute an MCP tool
       description: Proxies tool invocation with user token relay to downstream enterprise backends.
+      security:
+        - BearerAuth: []
       parameters:
         - name: tool_name
           in: path
@@ -100,3 +104,11 @@ paths:
           description: Unknown tool requested
         "500":
           description: Internal server or downstream backend error
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Relayed employee Bearer token or Choreo x-jwt-assertion.
