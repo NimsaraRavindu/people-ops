@@ -1,0 +1,217 @@
+openapi: 3.0.3
+info:
+  title: Policy MCP Server API
+  description: Model Context Protocol (MCP) server providing semantic vector search over HR and Training documents.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8003
+    description: Local development server
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns service liveness and PostgreSQL database connectivity status.
+      responses:
+        "200":
+          description: Service and database are healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: policy-mcp
+                  database:
+                    type: string
+                    example: connected
+        "503":
+          description: Service is degraded or database is unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: degraded
+                  service:
+                    type: string
+                    example: policy-mcp
+                  database:
+                    type: string
+                    example: unreachable
+  /register:
+    get:
+      summary: Discover MCP capabilities
+      description: Returns registered capability buckets and tool definitions for Agent Core.
+      responses:
+        "200":
+          description: List of capability kits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    bucket:
+                      type: string
+                      example: PO_POLICIES
+                    domain:
+                      type: string
+                      example: People Operations
+                    description:
+                      type: string
+                    version:
+                      type: string
+                    trigger_phrases:
+                      type: array
+                      items:
+                        type: string
+                    prompt_fragment:
+                      type: string
+                    tools:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          description:
+                            type: string
+                          read_only:
+                            type: boolean
+                          requires_confirmation:
+                            type: boolean
+  /tools/query_policy:
+    post:
+      summary: Query HR policies
+      description: Search official WSO2 HR and People Operations policy documents using semantic search.
+      parameters:
+        - in: header
+          name: Authorization
+          required: false
+          schema:
+            type: string
+          description: Bearer user JWT assertion
+        - in: header
+          name: X-JWT-Assertion
+          required: false
+          schema:
+            type: string
+          description: Downstream identity token passed from Agent Core
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Natural language policy question or search keywords
+                  example: What is the casual leave policy?
+                top_k:
+                  type: integer
+                  description: Maximum number of excerpts to return (1-10)
+                  default: 5
+                  example: 5
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        document:
+                          type: string
+                        excerpt:
+                          type: string
+                        similarity:
+                          type: number
+                  source_count:
+                    type: integer
+        "400":
+          description: Invalid request payload or missing query
+        "401":
+          description: Unauthorized - missing or invalid token
+        "500":
+          description: Internal server or search error
+  /tools/query_training:
+    post:
+      summary: Query training playbook
+      description: Search WSO2 Training & Certification playbook for exam guides, badges, and voucher queries.
+      parameters:
+        - in: header
+          name: Authorization
+          required: false
+          schema:
+            type: string
+          description: Bearer user JWT assertion
+        - in: header
+          name: X-JWT-Assertion
+          required: false
+          schema:
+            type: string
+          description: Downstream identity token passed from Agent Core
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Natural language training or certification question
+                  example: How do I get a certification voucher?
+                top_k:
+                  type: integer
+                  description: Maximum number of excerpts to return (1-10)
+                  default: 5
+                  example: 5
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        document:
+                          type: string
+                        excerpt:
+                          type: string
+                        similarity:
+                          type: number
+                  source_count:
+                    type: integer
+        "400":
+          description: Invalid request payload or missing query
+        "401":
+          description: Unauthorized - missing or invalid token
+        "500":
+          description: Internal server or search error

@@ -1,0 +1,10 @@
+schemaVersion: "1.2"
+endpoints:
+  - name: policy-ingestion-service
+    displayName: Policy Ingestion Service
+    service:
+      basePath: /
+      port: 8080
+    type: REST
+    networkVisibilities:
+      - Project

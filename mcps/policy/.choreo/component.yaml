@@ -1,0 +1,10 @@
+schemaVersion: "1.2"
+endpoints:
+  - name: policy-mcp
+    displayName: Policy MCP
+    service:
+      basePath: /
+      port: 8003
+    type: REST
+    networkVisibilities:
+      - Project
