@@ -43,72 +43,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /admin/status:
-    get:
-      summary: Ingestion status summary
-      description: Returns document counts, chunk counts per folder, and scheduler state.
-      operationId: getAdminStatus
-      tags:
-        - Admin
-      security:
-        - AdminKeyAuth: []
-        - {}
-      responses:
-        '200':
-          description: Status summary
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AdminStatusResponse'
-        '401':
-          description: Unauthorized admin access
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /admin/sync:
-    post:
-      summary: Trigger Google Drive sync
-      description: Triggers immediate full synchronization of configured Google Drive folders.
-      operationId: triggerSync
-      tags:
-        - Admin
-      security:
-        - AdminKeyAuth: []
-        - {}
-      parameters:
-        - name: wait
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: If true, blocks until sync completes and returns execution statistics.
-      responses:
-        '200':
-          description: Synchronization completed (when wait=true)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SyncResponse'
-        '202':
-          description: Synchronization scheduled in background
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SyncResponse'
-        '401':
-          description: Unauthorized admin access
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
   /embed:
     post:
       summary: Generate vector embeddings
-      description: Utility endpoint for single query or batch text embedding generation.
+      description: Internal endpoint for single query or batch text embedding generation.
       operationId: embedText
       tags:
         - Utility
@@ -132,41 +70,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /search:
-    post:
-      summary: Semantic chunk search
-      description: Searches indexed policy chunks using cosine distance similarity.
-      operationId: searchChunks
-      tags:
-        - Search
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SearchRequest'
-      responses:
-        '200':
-          description: Ranked search results
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SearchResponse'
-        '500':
-          description: Search execution error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
 components:
-  securitySchemes:
-    AdminKeyAuth:
-      type: apiKey
-      in: header
-      name: X-Admin-Key
-      description: Optional admin authentication key configured via ADMIN_API_KEY.
-
   schemas:
     HealthResponse:
       type: object
@@ -194,79 +98,20 @@ components:
           type: string
           example: connected
 
-    FolderSummary:
-      type: object
-      required:
-        - drive_folder_id
-        - doc_count
-      properties:
-        drive_folder_id:
-          type: string
-          example: 1A2B3C4D5E6F
-        doc_count:
-          type: integer
-          example: 14
-
-    AdminStatusResponse:
-      type: object
-      required:
-        - total_documents
-        - total_chunks
-        - folders
-      properties:
-        total_documents:
-          type: integer
-          example: 25
-        total_chunks:
-          type: integer
-          example: 312
-        folders:
-          type: array
-          items:
-            $ref: '#/components/schemas/FolderSummary'
-        last_synced_at:
-          type: string
-          format: date-time
-          nullable: true
-          example: '2026-10-25T12:00:00Z'
-        sync_scheduler_running:
-          type: boolean
-          example: true
-        sync_interval_hours:
-          type: integer
-          example: 24
-
-    SyncResponse:
-      type: object
-      required:
-        - status
-      properties:
-        status:
-          type: string
-          example: accepted
-        message:
-          type: string
-          example: Drive synchronization scheduled in background
-        folders:
-          type: array
-          items:
-            type: object
-        total_elapsed_seconds:
-          type: number
-          example: 4.52
-
     EmbedRequest:
       type: object
       properties:
         text:
           type: string
-          description: Single text string to embed
+          maxLength: 10000
+          description: Single text string to embed (max 10,000 characters)
           example: How do I apply for annual leave?
         texts:
           type: array
+          maxItems: 100
           items:
             type: string
-          description: Batch of text strings to embed
+          description: Batch of text strings to embed (max 100 items)
 
     EmbedResponse:
       type: object
@@ -289,70 +134,6 @@ components:
         count:
           type: integer
           example: 2
-
-    SearchRequest:
-      type: object
-      required:
-        - query
-      properties:
-        query:
-          type: string
-          description: Natural language search query
-          example: maternity leave policy duration
-        drive_folder_id:
-          type: string
-          nullable: true
-          description: Optional folder ID filter
-        top_k:
-          type: integer
-          default: 5
-          minimum: 1
-          maximum: 20
-          description: Max excerpts to retrieve
-
-    SearchResultItem:
-      type: object
-      required:
-        - document_name
-        - excerpt
-        - chunk_index
-        - drive_folder_id
-        - similarity_score
-      properties:
-        document_name:
-          type: string
-          example: WSO2_Leave_Policy_2026.docx
-        excerpt:
-          type: string
-          example: === WSO2_Leave_Policy_2026.docx ===\nMaternity leave entitlement...
-        chunk_index:
-          type: integer
-          example: 0
-        drive_folder_id:
-          type: string
-          example: 1A2B3C4D5E6F
-        similarity_score:
-          type: number
-          format: float
-          example: 0.8842
-
-    SearchResponse:
-      type: object
-      required:
-        - query
-        - results_count
-        - results
-      properties:
-        query:
-          type: string
-          example: maternity leave policy duration
-        results_count:
-          type: integer
-          example: 1
-        results:
-          type: array
-          items:
-            $ref: '#/components/schemas/SearchResultItem'
 
     ErrorResponse:
       type: object

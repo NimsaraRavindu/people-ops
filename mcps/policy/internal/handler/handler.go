@@ -139,18 +139,22 @@ func (h *Handler) Tools(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedToken := auth.ResolveToken(jwtToken)
 	userEmail := auth.ExtractEmailFromJWT(r.Context(), resolvedToken)
-	if userEmail == "" && !h.cfg.DevMockUserEnabled && os.Getenv("DEV_MOCK_USER_ENABLED") != "true" {
+
+	mockAllowed := auth.IsPermittedDevEnvironment() &&
+		(h.cfg.DevMockUserEnabled || os.Getenv("DEV_MOCK_USER_ENABLED") == "true")
+	if userEmail == "" && !mockAllowed {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized: valid user token required"})
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1 MB limit
 	var args map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request JSON"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request JSON or payload too large"})
 		return
 	}
 
@@ -186,11 +190,18 @@ func (h *Handler) Tools(w http.ResponseWriter, r *http.Request) {
 	case "query_training":
 		folderID = h.cfg.TrainingDriveFolderID
 	}
+	if folderID == "" {
+		slog.Error("Target folder ID not configured for tool", "tool", toolName)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Target folder ID not configured for this tool"})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.SearchTimeout)
 	defer cancel()
 
-	slog.Info("Executing policy search", "tool", toolName, "user", userEmail, "query", query)
+	slog.Info("Executing policy search", "tool", toolName, "user", userEmail, "queryLength", len(query))
 
 	if h.embedder == nil {
 		w.Header().Set("Content-Type", "application/json")

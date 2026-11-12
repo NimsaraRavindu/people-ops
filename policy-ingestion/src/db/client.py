@@ -16,6 +16,7 @@
 
 # Database client for PostgreSQL with pgvector operations.
 
+import asyncio
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -27,12 +28,33 @@ from ..config import settings
 logger = logging.getLogger("policy_ingestion.db")
 
 _pool: Optional[asyncpg.Pool] = None
+_pool_lock: Optional[asyncio.Lock] = None
+_pool_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_pool_lock() -> asyncio.Lock:
+    """Returns the pool lock bound to the running event loop."""
+    global _pool_lock, _pool_loop
+    try:
+        loop = asyncio.get_running_loop()
+        if _pool_lock is None or _pool_loop is not loop:
+            _pool_lock = asyncio.Lock()
+            _pool_loop = loop
+    except RuntimeError:
+        if _pool_lock is None:
+            _pool_lock = asyncio.Lock()
+            _pool_loop = None
+    return _pool_lock
 
 
 async def get_db_pool() -> asyncpg.Pool:
-    """Returns or creates the global asyncpg connection pool."""
+    """Returns or creates the global asyncpg connection pool (coroutine-safe)."""
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    async with _get_pool_lock():
+        if _pool is not None:
+            return _pool
         dsn = settings.get_database_dsn()
         logger.info("Initializing PostgreSQL connection pool...")
 
@@ -43,8 +65,6 @@ async def get_db_pool() -> asyncpg.Pool:
             except Exception as e:
                 logger.debug(f"pgvector registration check: {e}")
 
-        # Extract sslmode if present for asyncpg
-        ssl = "require" if settings.DB_SSL.lower() in ("true", "require", "1") else False
         _pool = await asyncpg.create_pool(
             dsn=dsn,
             min_size=2,
@@ -53,21 +73,22 @@ async def get_db_pool() -> asyncpg.Pool:
             timeout=30.0,
         )
         logger.info("PostgreSQL connection pool initialized successfully.")
-    return _pool
+        return _pool
 
 
 async def close_db_pool() -> None:
     """Closes the asyncpg connection pool."""
-    global _pool
+    global _pool, _pool_lock, _pool_loop
     if _pool is not None:
         logger.info("Closing PostgreSQL connection pool...")
         await _pool.close()
         _pool = None
+        _pool_lock = None
+        _pool_loop = None
 
 
 async def init_db() -> None:
     """Initializes tables and extensions from schema.sql."""
-    pool = await get_db_pool()
     schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
     if not os.path.exists(schema_path):
         logger.warning(f"Schema file not found at {schema_path}")
@@ -76,10 +97,17 @@ async def init_db() -> None:
     with open(schema_path, "r", encoding="utf-8") as f:
         schema_sql = f.read()
 
-    async with pool.acquire() as conn:
-        logger.info("Executing schema.sql migrations...")
-        await conn.execute(schema_sql)
+    dsn = settings.get_database_dsn()
+    logger.info("Connecting to execute schema.sql migrations...")
+    bootstrap_conn = await asyncpg.connect(dsn=dsn)
+    try:
+        await bootstrap_conn.execute(schema_sql)
         logger.info("Database schema initialized successfully.")
+    finally:
+        await bootstrap_conn.close()
+
+    # Pre-warm connection pool with registered vector codecs
+    await get_db_pool()
 
 
 async def check_db_health() -> bool:
@@ -98,7 +126,8 @@ async def get_document_metadata(doc_id: str) -> Optional[Dict[str, Any]]:
     """Retrieves metadata of a single tracked policy document."""
     pool = await get_db_pool()
     query = """
-        SELECT id, name, mime_type, modified_time, drive_folder_id, content_hash, synced_at
+        SELECT id, name, mime_type, modified_time, drive_folder_id,
+               content_hash, embedding_model, synced_at
         FROM policy_documents
         WHERE id = $1
     """
@@ -114,7 +143,8 @@ async def upsert_document_and_chunks(
     modified_time: Any,
     drive_folder_id: str,
     content_hash: str,
-    chunks: List[Dict[str, Any]]
+    chunks: List[Dict[str, Any]],
+    embedding_model: Optional[str] = None
 ) -> None:
     """
     Atomic transaction: upserts document metadata and replaces its chunk embeddings.
@@ -126,18 +156,21 @@ async def upsert_document_and_chunks(
             await conn.execute(
                 """
                 INSERT INTO policy_documents (
-                    id, name, mime_type, modified_time, drive_folder_id, content_hash, synced_at
+                    id, name, mime_type, modified_time, drive_folder_id,
+                    content_hash, embedding_model, synced_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     name = EXCLUDED.name,
                     mime_type = EXCLUDED.mime_type,
                     modified_time = EXCLUDED.modified_time,
                     drive_folder_id = EXCLUDED.drive_folder_id,
                     content_hash = EXCLUDED.content_hash,
+                    embedding_model = EXCLUDED.embedding_model,
                     synced_at = NOW();
                 """,
-                doc_id, name, mime_type, modified_time, drive_folder_id, content_hash
+                doc_id, name, mime_type, modified_time, drive_folder_id,
+                content_hash, embedding_model
             )
 
             # 2. Delete prior chunks for this document
@@ -164,20 +197,63 @@ async def upsert_document_and_chunks(
                 )
 
 
-async def prune_missing_documents(drive_folder_id: str, active_doc_ids: List[str]) -> int:
-    """Removes documents (and cascading chunks) that no longer exist in the Drive folder."""
-    if not active_doc_ids:
-        return 0
+async def update_document_metadata(
+    doc_id: str,
+    name: str,
+    drive_folder_id: str,
+    modified_time: Optional[Any] = None,
+) -> None:
+    """Updates document metadata (name, folder, mtime) when text content is unchanged."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        deleted = await conn.execute(
-            """
-            DELETE FROM policy_documents
-            WHERE drive_folder_id = $1 AND NOT (id = ANY($2::text[]));
-            """,
-            drive_folder_id,
-            active_doc_ids,
-        )
+        if modified_time:
+            await conn.execute(
+                """
+                UPDATE policy_documents
+                SET name = $1, drive_folder_id = $2, modified_time = $3, synced_at = NOW()
+                WHERE id = $4;
+                """,
+                name, drive_folder_id, modified_time, doc_id
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE policy_documents
+                SET name = $1, drive_folder_id = $2, synced_at = NOW()
+                WHERE id = $3;
+                """,
+                name, drive_folder_id, doc_id
+            )
+
+
+async def delete_document(doc_id: str) -> None:
+    """Deletes a document and its cascading chunks from pgvector."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM policy_documents WHERE id = $1;", doc_id)
+
+
+async def prune_missing_documents(drive_folder_id: str, active_doc_ids: List[str]) -> int:
+    """Removes documents (and cascading chunks) that no longer exist in the Drive folder."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        if not active_doc_ids:
+            deleted = await conn.execute(
+                """
+                DELETE FROM policy_documents
+                WHERE drive_folder_id = $1;
+                """,
+                drive_folder_id,
+            )
+        else:
+            deleted = await conn.execute(
+                """
+                DELETE FROM policy_documents
+                WHERE drive_folder_id = $1 AND NOT (id = ANY($2::text[]));
+                """,
+                drive_folder_id,
+                active_doc_ids,
+            )
         try:
             return int(deleted.split()[-1])
         except Exception:
@@ -214,8 +290,6 @@ async def search_similar_chunks(
 ) -> List[Dict[str, Any]]:
     """Performs cosine distance similarity search on policy chunks."""
     pool = await get_db_pool()
-    # Format embedding as vector string representation
-    vector_literal = f"[{','.join(f'{x:.8f}' for x in embedding)}]"
 
     base_query = """
         SELECT
@@ -227,7 +301,7 @@ async def search_similar_chunks(
         FROM policy_chunks pc
         JOIN policy_documents pd ON pd.id = pc.document_id
     """
-    params = [vector_literal]
+    params = [embedding]
 
     if drive_folder_id:
         base_query += " WHERE pd.drive_folder_id = $2"
@@ -239,5 +313,17 @@ async def search_similar_chunks(
         params.append(top_k)
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(base_query, *params)
-        return [dict(r) for r in rows]
+        async with conn.transaction():
+            try:
+                await conn.execute("SELECT '[1]'::vector;")
+                has_iter = await conn.fetchval(
+                    "SELECT current_setting('hnsw.iterative_scan', true);"
+                )
+                if has_iter:
+                    await conn.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order';")
+                await conn.execute("SET LOCAL hnsw.ef_search = 100;")
+            except Exception as e:
+                logger.error(f"Failed to configure vector search session settings: {e}")
+                raise
+            rows = await conn.fetch(base_query, *params)
+            return [dict(r) for r in rows]

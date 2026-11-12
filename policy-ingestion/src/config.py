@@ -18,6 +18,7 @@
 
 import os
 from typing import Optional
+from urllib.parse import parse_qs, quote_plus, urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,7 +29,6 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     PORT: int = 8080
     LOG_LEVEL: str = "info"
-    ADMIN_API_KEY: Optional[str] = None
 
     # Database Configuration (PostgreSQL with pgvector)
     DATABASE_URL: Optional[str] = None
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     DB_NAME: str = "defaultdb"
     DB_USER: Optional[str] = "postgres"
     DB_PASSWORD: Optional[str] = "postgres"
-    DB_SSL: str = "disable"
+    DB_SSL: Optional[str] = None
 
     # Google Drive OAuth Credentials (supports both POLICY_* and legacy HR_POLICY_* keys)
     POLICY_GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
@@ -101,16 +101,49 @@ class Settings(BaseSettings):
         return self.TRAINING_DRIVE_FOLDER_ID or ""
 
     def get_database_dsn(self) -> str:
-        """Constructs an asyncpg DSN connection string."""
+        """Constructs an asyncpg DSN connection string with verified TLS in production."""
+        is_prod = self.ENVIRONMENT.lower() in ("production", "prod")
+
         if self.DATABASE_URL:
-            # Normalize scheme if using standard postgresql://
             dsn = self.DATABASE_URL
             if dsn.startswith("postgresql+asyncpg://"):
                 dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+            if is_prod:
+                parsed = urlparse(dsn)
+                params = parse_qs(parsed.query)
+                ssl_modes = params.get("sslmode", [])
+                ssl_mode = ssl_modes[0].lower().strip() if ssl_modes else None
+                if ssl_mode != "verify-full":
+                    raise ValueError(
+                        f"Insecure database connection rejected: production requires verified TLS "
+                        f"(sslmode=verify-full, got '{ssl_mode or 'unset'}')."
+                    )
             return dsn
 
-        ssl_mode = "require" if self.DB_SSL.lower() in ("true", "require", "1") else "disable"
-        user_auth = f"{self.DB_USER}:{self.DB_PASSWORD}@" if self.DB_USER else ""
+        raw_ssl = (self.DB_SSL or "").lower().strip() if self.DB_SSL else ""
+        if not raw_ssl:
+            ssl_mode = "verify-full" if is_prod else "disable"
+        elif raw_ssl in ("true", "1", "require"):
+            ssl_mode = "require"
+        elif raw_ssl in ("disable", "allow", "prefer", "verify-ca", "verify-full"):
+            ssl_mode = raw_ssl
+        else:
+            raise ValueError(
+                f"Unsupported DB_SSL mode '{self.DB_SSL}'. Supported modes: disable, allow, "
+                f"prefer, require, verify-ca, verify-full."
+            )
+
+        if is_prod and ssl_mode != "verify-full":
+            raise ValueError(
+                f"Insecure database connection rejected: production requires verified TLS "
+                f"(sslmode=verify-full, got '{ssl_mode}')."
+            )
+
+        user_auth = ""
+        if self.DB_USER:
+            user = quote_plus(self.DB_USER)
+            password = quote_plus(self.DB_PASSWORD or "")
+            user_auth = f"{user}:{password}@" if self.DB_PASSWORD else f"{user}@"
         return (
             f"postgresql://{user_auth}{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?sslmode={ssl_mode}"
         )

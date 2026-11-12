@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/model"
@@ -40,11 +41,36 @@ type PgVectorDB struct {
 	pool *pgxpool.Pool
 }
 
+// isProductionEnv determines whether the active runtime environment is production.
+// ENV takes precedence over ENVIRONMENT if both are configured.
+func isProductionEnv() bool {
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV"))); env != "" {
+		return env == "production" || env == "prod"
+	}
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("ENVIRONMENT"))); env != "" {
+		return env == "production" || env == "prod"
+	}
+	return false
+}
+
 // NewPgVectorDB initializes a connection pool to the PostgreSQL pgvector database.
 func NewPgVectorDB(ctx context.Context, dsn string) (*PgVectorDB, error) {
 	poolConfig, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse database DSN: %w", err)
+	}
+	isProd := isProductionEnv()
+	if isProd {
+		if poolConfig.ConnConfig.TLSConfig == nil || poolConfig.ConnConfig.TLSConfig.InsecureSkipVerify {
+			return nil, fmt.Errorf("insecure database connection rejected: production requires verified TLS")
+		}
+		for _, fb := range poolConfig.ConnConfig.Fallbacks {
+			if fb.TLSConfig == nil || fb.TLSConfig.InsecureSkipVerify {
+				return nil, fmt.Errorf(
+					"insecure database fallback connection rejected: production requires verified TLS on all endpoints",
+				)
+			}
+		}
 	}
 	poolConfig.MaxConns = 10
 	poolConfig.MinConns = 2
@@ -101,6 +127,37 @@ func (db *PgVectorDB) SearchChunks(
 	sb.WriteString("]")
 	vecLiteral := sb.String()
 
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin vector search transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Touch vector extension to register custom GUC settings in PostgreSQL backend
+	if _, err := tx.Exec(ctx, "SELECT '[1]'::vector;"); err != nil {
+		return nil, fmt.Errorf("failed to warm up pgvector extension: %w", err)
+	}
+	var hasIterativeScan *string
+	scanErr := tx.QueryRow(ctx, "SELECT current_setting('hnsw.iterative_scan', true)").Scan(&hasIterativeScan)
+	if scanErr != nil {
+		return nil, fmt.Errorf("failed to query hnsw.iterative_scan setting: %w", scanErr)
+	}
+	if hasIterativeScan != nil && *hasIterativeScan != "" {
+		if _, err := tx.Exec(ctx, "SET LOCAL hnsw.iterative_scan = 'relaxed_order'"); err != nil {
+			return nil, fmt.Errorf("failed to set hnsw.iterative_scan: %w", err)
+		}
+	} else if folderID != "" {
+		// When pgvector < 0.8.0 lacks iterative index scan, filtered HNSW index scans
+		// suffer from overfiltering and miss candidate rows. Disable HNSW index scan
+		// for folder-filtered queries to fall back to exact scan across filtered folder chunks.
+		if _, err := tx.Exec(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
+			return nil, fmt.Errorf("failed to set enable_indexscan for folder fallback: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL hnsw.ef_search = 100"); err != nil {
+		return nil, fmt.Errorf("failed to set hnsw.ef_search: %w", err)
+	}
+
 	var query string
 	var args []interface{}
 
@@ -131,7 +188,7 @@ func (db *PgVectorDB) SearchChunks(
 		args = []interface{}{vecLiteral, topK}
 	}
 
-	rows, err := db.pool.Query(ctx, query, args...)
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgvector query failed: %w", err)
 	}
@@ -145,13 +202,75 @@ func (db *PgVectorDB) SearchChunks(
 		}
 		results = append(results, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading query results: %w", err)
+	}
+	_ = tx.Commit(ctx)
 
 	return results, nil
 }
 
+// splitKeywordValueDSN splits a PostgreSQL keyword/value connection string while preserving quotes and escapes.
+func splitKeywordValueDSN(dsn string) []string {
+	var tokens []string
+	var sb strings.Builder
+	inQuote := rune(0)
+	escaped := false
+	for _, r := range dsn {
+		if escaped {
+			sb.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			sb.WriteRune(r)
+			continue
+		}
+		if inQuote != 0 {
+			sb.WriteRune(r)
+			if r == inQuote {
+				inQuote = 0
+			}
+		} else if r == '\'' || r == '"' {
+			inQuote = r
+			sb.WriteRune(r)
+		} else if unicode.IsSpace(r) {
+			if sb.Len() > 0 {
+				tokens = append(tokens, sb.String())
+				sb.Reset()
+			}
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	if sb.Len() > 0 {
+		tokens = append(tokens, sb.String())
+	}
+	return tokens
+}
+
 // BuildDSNFromEnv constructs a PostgreSQL connection string from environment variables.
 func BuildDSNFromEnv() string {
+	isProd := isProductionEnv()
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		if isProd {
+			if u, err := url.Parse(dsn); err == nil && u.Scheme != "" {
+				q := u.Query()
+				q.Set("sslmode", "verify-full")
+				u.RawQuery = q.Encode()
+				return u.String()
+			}
+			parts := splitKeywordValueDSN(dsn)
+			var filtered []string
+			for _, p := range parts {
+				if !strings.HasPrefix(strings.ToLower(p), "sslmode=") {
+					filtered = append(filtered, p)
+				}
+			}
+			filtered = append(filtered, "sslmode=verify-full")
+			return strings.Join(filtered, " ")
+		}
 		return dsn
 	}
 
@@ -175,16 +294,26 @@ func BuildDSNFromEnv() string {
 	dbSSL := os.Getenv("DB_SSL")
 
 	sslMode := "disable"
-	if strings.ToLower(dbSSL) == "true" || strings.ToLower(dbSSL) == "require" {
-		sslMode = "require"
+	if isProd {
+		sslMode = "verify-full"
+	} else if dbSSL != "" {
+		lower := strings.ToLower(dbSSL)
+		switch lower {
+		case "true", "require":
+			sslMode = "require"
+		case "verify-full", "verify-ca":
+			sslMode = lower
+		default:
+			sslMode = "disable"
+		}
 	}
 
 	userInfo := ""
 	if dbUser != "" {
 		if dbPassword != "" {
-			userInfo = fmt.Sprintf("%s:%s@", dbUser, url.QueryEscape(dbPassword))
+			userInfo = fmt.Sprintf("%s:%s@", url.QueryEscape(dbUser), url.QueryEscape(dbPassword))
 		} else {
-			userInfo = fmt.Sprintf("%s@", dbUser)
+			userInfo = fmt.Sprintf("%s@", url.QueryEscape(dbUser))
 		}
 	}
 	return fmt.Sprintf("postgres://%s%s:%s/%s?sslmode=%s", userInfo, dbHost, dbPort, dbName, sslMode)

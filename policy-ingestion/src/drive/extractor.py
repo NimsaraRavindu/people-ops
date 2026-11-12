@@ -22,6 +22,8 @@ from typing import Optional
 import httpx
 from pypdf import PdfReader
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from .client import DRIVE_API_BASE, DriveFileMetadata, drive_client
 
@@ -33,18 +35,37 @@ MIME_TEXT_PLAIN = "text/plain"
 MIME_PDF = "application/pdf"
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+SUPPORTED_MIME_TYPES = {
+    MIME_GOOGLE_DOC,
+    MIME_TEXT_PLAIN,
+    MIME_PDF,
+    MIME_DOCX,
+}
+
 SUSPICIOUS_TEXT_THRESHOLD = 50
 
 
 async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
     """
     Downloads and extracts raw text content from a Google Drive file.
-    Returns None for unsupported or folder MIME types.
+    Returns None for unsupported or folder MIME types without requesting an access token.
     """
+    # 1. Skip Google Drive Folder immediately
+    if file_meta.mime_type == MIME_GOOGLE_FOLDER:
+        logger.debug(f"Skipping directory item: {file_meta.name}")
+        return None
+
+    # 2. Skip unsupported MIME types immediately
+    if file_meta.mime_type not in SUPPORTED_MIME_TYPES:
+        logger.warning(
+            f"Skipping unsupported file '{file_meta.name}' with MIME type '{file_meta.mime_type}'"
+        )
+        return None
+
     token = await drive_client.get_access_token()
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 1. Google Document -> Export as text/plain
+    # 3. Google Document -> Export as text/plain
     if file_meta.mime_type == MIME_GOOGLE_DOC:
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.get(
@@ -58,12 +79,12 @@ async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
                 )
             return resp.text
 
-    # 2. Plain Text File -> Direct media download
+    # 4. Plain Text File -> Direct media download
     if file_meta.mime_type == MIME_TEXT_PLAIN:
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.get(
                 f"{DRIVE_API_BASE}/files/{file_meta.id}",
-                params={"alt": "media"},
+                params={"alt": "media", "supportsAllDrives": "true"},
                 headers=headers,
             )
             if resp.status_code != 200:
@@ -72,7 +93,7 @@ async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
                 )
             return resp.text
 
-    # 3. PDF File -> Download binary and extract text with pypdf
+    # 5. PDF File -> Download binary and extract text with pypdf
     if file_meta.mime_type == MIME_PDF:
         raw_bytes = await _download_binary(file_meta.id, headers)
         reader = PdfReader(io.BytesIO(raw_bytes))
@@ -86,33 +107,35 @@ async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
         _warn_if_suspiciously_short(file_meta.name, full_text, "PDF")
         return full_text
 
-    # 4. DOCX Document -> Download binary and extract text with python-docx
+    # 6. DOCX Document -> Extract text preserving document order of paragraphs and tables
     if file_meta.mime_type == MIME_DOCX:
         raw_bytes = await _download_binary(file_meta.id, headers)
         doc = Document(io.BytesIO(raw_bytes))
-        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        full_text = "\n\n".join(paragraphs)
+        elements = []
+        for block in doc.element.body:
+            if block.tag.endswith("p"):
+                p = Paragraph(block, doc)
+                if p.text.strip():
+                    elements.append(p.text.strip())
+            elif block.tag.endswith("tbl"):
+                table = Table(block, doc)
+                for row in table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        elements.append(" | ".join(cells))
+        full_text = "\n\n".join(elements)
         _warn_if_suspiciously_short(file_meta.name, full_text, "DOCX")
         return full_text
 
-    # 5. Google Drive Folder -> Intentionally skipped
-    if file_meta.mime_type == MIME_GOOGLE_FOLDER:
-        logger.debug(f"Skipping directory item: {file_meta.name}")
-        return None
-
-    # Unsupported MIME types
-    logger.warning(
-        f"Skipping unsupported file '{file_meta.name}' with MIME type '{file_meta.mime_type}'"
-    )
     return None
 
 
 async def _download_binary(file_id: str, headers: dict) -> bytes:
-    """Downloads raw binary media for PDF and DOCX parsing."""
+    """Downloads raw binary media for PDF and DOCX parsing with shared drive support."""
     async with httpx.AsyncClient(timeout=60.0) as http:
         resp = await http.get(
             f"{DRIVE_API_BASE}/files/{file_id}",
-            params={"alt": "media"},
+            params={"alt": "media", "supportsAllDrives": "true"},
             headers=headers,
         )
         if resp.status_code != 200:

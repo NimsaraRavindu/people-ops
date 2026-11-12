@@ -14,6 +14,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -48,7 +49,8 @@ async def test_health_endpoint():
 async def test_ready_endpoint_connected():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("src.main.check_db_health", new_callable=AsyncMock) as mock_health:
+        with patch("src.main._db_initialized", True), \
+             patch("src.main.check_db_health", new_callable=AsyncMock) as mock_health:
             mock_health.return_value = True
             resp = await client.get("/ready")
             assert resp.status_code == 200
@@ -58,10 +60,39 @@ async def test_ready_endpoint_connected():
 
 
 @pytest.mark.asyncio
+async def test_ready_endpoint_db_not_initialized():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("src.main._db_initialized", False), \
+             patch("src.main.init_db", side_effect=RuntimeError("connection refused")):
+            resp = await client.get("/ready")
+            assert resp.status_code == 503
+            assert "Database schema initialization failed" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_ready_endpoint_recovers_after_db_initialized():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("src.main._db_initialized", False), \
+             patch("src.main.init_db", new_callable=AsyncMock) as mock_init, \
+             patch("src.main.check_db_health", new_callable=AsyncMock) as mock_health:
+            mock_init.return_value = None
+            mock_health.return_value = True
+            resp = await client.get("/ready")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "ready"
+            assert data["database"] == "connected"
+            mock_init.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ready_endpoint_unavailable():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("src.main.check_db_health", new_callable=AsyncMock) as mock_health:
+        with patch("src.main._db_initialized", True), \
+             patch("src.main.check_db_health", new_callable=AsyncMock) as mock_health:
             mock_health.return_value = False
             resp = await client.get("/ready")
             assert resp.status_code == 503
@@ -103,58 +134,147 @@ async def test_embed_endpoint_missing_parameters():
 
 
 @pytest.mark.asyncio
-async def test_admin_auth_protection():
+async def test_embed_endpoint_oversized_batch_item():
     transport = ASGITransport(app=app)
-    settings.ADMIN_API_KEY = "test-secret-key"
-
-    try:
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            # 1. Missing header -> 401 Unauthorized
-            resp_unauth = await client.get("/admin/status")
-            assert resp_unauth.status_code == 401
-
-            # 2. Invalid header -> 401 Unauthorized
-            resp_bad = await client.get("/admin/status", headers={"X-Admin-Key": "wrong-key"})
-            assert resp_bad.status_code == 401
-
-            # 3. Valid header -> 200 OK
-            with patch("src.main.get_status_summary", new_callable=AsyncMock) as mock_summary:
-                mock_summary.return_value = {
-                    "total_documents": 10,
-                    "total_chunks": 100,
-                    "folders": [],
-                    "last_synced_at": None,
-                }
-                resp_ok = await client.get("/admin/status", headers={"X-Admin-Key": "test-secret-key"})
-                assert resp_ok.status_code == 200
-                data = resp_ok.json()
-                assert data["total_documents"] == 10
-                assert data["total_chunks"] == 100
-    finally:
-        settings.ADMIN_API_KEY = None
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        payload = {"texts": ["x" * 10001]}
+        resp = await client.post("/embed", json=payload)
+        assert resp.status_code == 400
+        assert "exceeds maximum length" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_search_endpoint_mocked():
-    transport = ASGITransport(app=app)
-    mock_db_results = [
-        {
-            "document_name": "leave_policy.docx",
-            "excerpt": "=== leave_policy.docx ===\nAnnual leave entitlement is 21 days.",
-            "chunk_index": 0,
-            "drive_folder_id": "folder-123",
-            "similarity_score": 0.8842,
-        }
-    ]
+async def test_concurrent_ensure_db_initialized():
+    import asyncio
+    from src.main import ensure_db_initialized
 
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("src.main.search_similar_chunks", new_callable=AsyncMock) as mock_search:
-            mock_search.return_value = mock_db_results
-            payload = {"query": "annual leave days", "top_k": 3}
-            resp = await client.post("/search", json=payload)
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["query"] == "annual leave days"
-            assert data["results_count"] == 1
-            assert len(data["results"]) == 1
-            assert data["results"][0]["document_name"] == "leave_policy.docx"
+    init_calls = 0
+
+    async def suspending_init_db():
+        nonlocal init_calls
+        init_calls += 1
+        # Explicitly suspend to guarantee concurrent callers overlap during initialization
+        await asyncio.sleep(0.04)
+        return None
+
+    with patch("src.main._db_initialized", False), \
+         patch("src.main.init_db", side_effect=suspending_init_db):
+        results = await asyncio.gather(*[ensure_db_initialized() for _ in range(5)])
+        assert all(results)
+        assert init_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failure_followed_by_recovery():
+    import asyncio
+    from src.main import ensure_db_initialized
+
+    call_count = 0
+
+    async def failing_then_suspending_init():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await asyncio.sleep(0.02)
+            raise RuntimeError("Transient database network failure")
+        await asyncio.sleep(0.03)
+        return None
+
+    with patch("src.main._db_initialized", False), \
+         patch("src.main.init_db", side_effect=failing_then_suspending_init):
+        # 3 tasks launch simultaneously
+        results = await asyncio.gather(
+            ensure_db_initialized(),
+            ensure_db_initialized(),
+            ensure_db_initialized(),
+        )
+        # Task 1 failed, Task 2 recovered and succeeded, Task 3 observed initialized state
+        assert results == [False, True, True]
+        assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sync_wrapper_skips_when_uninitialized():
+    from src.main import _scheduled_sync_wrapper
+    with patch("src.main.ensure_db_initialized", new_callable=AsyncMock) as mock_ensure, \
+         patch("src.main.run_full_sync", new_callable=AsyncMock) as mock_sync:
+        mock_ensure.return_value = False
+        await _scheduled_sync_wrapper()
+        mock_sync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sync_wrapper_runs_when_initialized():
+    from src.main import _scheduled_sync_wrapper
+    with patch("src.main.ensure_db_initialized", new_callable=AsyncMock) as mock_ensure, \
+         patch("src.main.run_full_sync", new_callable=AsyncMock) as mock_sync:
+        mock_ensure.return_value = True
+        mock_sync.return_value = {"status": "completed"}
+        await _scheduled_sync_wrapper()
+        mock_sync.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_worker():
+    from src.main import _init_db_with_retry
+    with patch("src.main._db_initialized", False), \
+         patch("src.main.init_db", new_callable=AsyncMock) as mock_init, \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        mock_init.side_effect = [RuntimeError("DB temporarily down"), None]
+        await _init_db_with_retry()
+        assert mock_init.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_db_init_lock_retained_when_loop_attribute_is_none():
+    from src.main import _get_db_init_lock
+
+    lock1 = _get_db_init_lock()
+    # Simulate Python 3.11 uncontended lock behavior where _loop is cleared
+    if hasattr(lock1, "_loop"):
+        lock1._loop = None
+
+    lock2 = _get_db_init_lock()
+    assert lock1 is lock2, "Init lock must not be recreated when running on the same event loop"
+
+
+@pytest.mark.asyncio
+async def test_pool_lock_retained_when_loop_attribute_is_none():
+    from src.db.client import _get_pool_lock
+
+    lock1 = _get_pool_lock()
+    if hasattr(lock1, "_loop"):
+        lock1._loop = None
+
+    lock2 = _get_pool_lock()
+    assert lock1 is lock2, "Pool lock must not be recreated when running on the same event loop"
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_cancels_and_awaits_background_workers():
+    from src.main import lifespan, app, _background_tasks, _track_background_task
+
+    worker_cancelled = False
+
+    async def long_running_worker():
+        nonlocal worker_cancelled
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            worker_cancelled = True
+            raise
+
+    with patch("src.main.ensure_db_initialized", new_callable=AsyncMock, return_value=True), \
+         patch("src.main.close_db_pool", new_callable=AsyncMock) as mock_close, \
+         patch("src.config.settings.SYNC_ENABLED", False):
+        async with lifespan(app):
+            task = _track_background_task(long_running_worker())
+            await asyncio.sleep(0.01)
+            assert task in _background_tasks
+            assert not task.done()
+
+        assert worker_cancelled
+        assert task.done()
+        assert task.cancelled()
+        assert task not in _background_tasks
+        mock_close.assert_called_once()

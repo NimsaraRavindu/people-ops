@@ -18,7 +18,13 @@
 
 -- Enable pgvector extension (ensure latest patched version)
 CREATE EXTENSION IF NOT EXISTS vector;
-ALTER EXTENSION vector UPDATE;
+DO $$
+BEGIN
+    ALTER EXTENSION vector UPDATE;
+EXCEPTION WHEN OTHERS THEN
+    -- Ignore ownership or privilege errors if vector extension is managed by a cloud provider role
+    NULL;
+END $$;
 
 -- Tracked Google Drive document metadata & sync timestamps
 CREATE TABLE IF NOT EXISTS policy_documents (
@@ -28,8 +34,17 @@ CREATE TABLE IF NOT EXISTS policy_documents (
     modified_time   TIMESTAMPTZ NOT NULL,
     drive_folder_id TEXT NOT NULL,                 -- Identifies HR Policy vs Training folder
     content_hash    TEXT,                          -- SHA-256 hash of extracted text
+    embedding_model TEXT,                          -- Embedding provider and model identifier
     synced_at       TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Ensure embedding_model column exists on existing installations
+DO $$
+BEGIN
+    ALTER TABLE policy_documents ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
 
 -- Chunked document text with vector embeddings
 CREATE TABLE IF NOT EXISTS policy_chunks (

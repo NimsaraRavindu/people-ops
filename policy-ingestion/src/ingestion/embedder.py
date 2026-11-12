@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import threading
 from typing import Any, List, Optional
 
 from ..config import settings
@@ -28,36 +29,37 @@ from ..config import settings
 logger = logging.getLogger("policy_ingestion.embedder")
 
 _fastembed_model: Optional[Any] = None
-_model_lock = asyncio.Lock()
+_model_lock = threading.Lock()
 
 
 def _get_fastembed_model(model_name: str) -> Any:
-    """Lazily initializes the FastEmbed TextEmbedding model on CPU."""
+    """Lazily initializes the FastEmbed TextEmbedding model on CPU (thread-safe)."""
     global _fastembed_model
-    if _fastembed_model is None:
-        try:
-            from fastembed import TextEmbedding
+    with _model_lock:
+        if _fastembed_model is None:
+            try:
+                from fastembed import TextEmbedding
 
-            logger.info("Initializing local FastEmbed model: %s...", model_name)
-            _fastembed_model = TextEmbedding(model_name=model_name)
-            logger.info("FastEmbed model %s initialized successfully.", model_name)
-        except ImportError as e:
-            if settings.ENVIRONMENT.lower() in ("production", "prod", "staging"):
-                raise RuntimeError(
-                    "fastembed is required in production environments when EMBEDDING_PROVIDER is 'local'."
-                ) from e
-            logger.warning(
-                "fastembed is not installed. Falling back to deterministic dummy embeddings (dev mode only)."
-            )
-            return None
-        except Exception as e:
-            if settings.ENVIRONMENT.lower() in ("production", "prod", "staging"):
-                raise RuntimeError(
-                    f"Failed to load local FastEmbed model {model_name} in production: {e}"
-                ) from e
-            logger.error("Failed to load local FastEmbed model %s: %s", model_name, e)
-            return None
-    return _fastembed_model
+                logger.info("Initializing local FastEmbed model: %s...", model_name)
+                _fastembed_model = TextEmbedding(model_name=model_name)
+                logger.info("FastEmbed model %s initialized successfully.", model_name)
+            except ImportError as e:
+                if settings.ENVIRONMENT.lower() in ("production", "prod", "staging"):
+                    raise RuntimeError(
+                        "fastembed is required in production environments when EMBEDDING_PROVIDER is 'local'."
+                    ) from e
+                logger.warning(
+                    "fastembed is not installed. Falling back to deterministic dummy embeddings (dev mode only)."
+                )
+                return None
+            except Exception as e:
+                if settings.ENVIRONMENT.lower() in ("production", "prod", "staging"):
+                    raise RuntimeError(
+                        f"Failed to load local FastEmbed model {model_name} in production: {e}"
+                    ) from e
+                logger.error("Failed to load local FastEmbed model %s: %s", model_name, e)
+                return None
+        return _fastembed_model
 
 
 class TextEmbedder:
@@ -91,13 +93,11 @@ class TextEmbedder:
 
     async def _embed_local(self, texts: List[str]) -> List[List[float]]:
         """Generates embeddings locally on CPU using FastEmbed ONNX runtime."""
-        model = _get_fastembed_model(self.model)
+        model = await asyncio.to_thread(_get_fastembed_model, self.model)
         if model is None:
-            if settings.ENVIRONMENT.lower() in ("production", "prod", "staging"):
-                raise RuntimeError(
-                    "Local FastEmbed model is unavailable. Ingestion halted to prevent database corruption."
-                )
-            return self._embed_dummy(texts)
+            raise RuntimeError(
+                "Local FastEmbed model failed to load. Ingestion halted to prevent corrupt vector data."
+            )
 
         # Offload ONNX CPU compute to a worker thread to keep the asyncio event loop responsive
         def _compute() -> List[List[float]]:

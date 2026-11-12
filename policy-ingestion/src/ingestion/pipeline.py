@@ -25,8 +25,10 @@ from typing import Any, Dict, List
 
 from ..config import settings
 from ..db.client import (
+    delete_document,
     get_document_metadata,
     prune_missing_documents,
+    update_document_metadata,
     upsert_document_and_chunks,
 )
 from ..drive.client import DriveFileMetadata, drive_client
@@ -64,6 +66,7 @@ async def sync_drive_folder(folder_id: str, label: str = "Folder") -> Dict[str, 
         "documents_processed": 0,
         "documents_unchanged": 0,
         "documents_skipped": 0,
+        "documents_failed": 0,
         "chunks_created": 0,
     }
 
@@ -78,7 +81,7 @@ async def sync_drive_folder(folder_id: str, label: str = "Folder") -> Dict[str, 
                 stats["documents_skipped"] += 1
         except Exception as e:
             logger.error(f"[{label}] Error processing file '{file_meta.name}' ({file_meta.id}): {e}")
-            stats["documents_skipped"] += 1
+            stats["documents_failed"] += 1
 
     # Prune documents removed from Google Drive
     active_doc_ids = [f.id for f in files]
@@ -88,10 +91,16 @@ async def sync_drive_folder(folder_id: str, label: str = "Folder") -> Dict[str, 
         logger.info(f"[{label}] Pruned {pruned_count} deleted documents from vector database.")
 
     stats["elapsed_seconds"] = round(time.time() - start_time, 2)
+    if stats["documents_failed"] > 0:
+        stats["status"] = "error" if stats["documents_processed"] == 0 else "partial_failure"
+    else:
+        stats["status"] = "completed"
+
     logger.info(
         f"[{label}] Sync finished: {stats['documents_processed']} updated, "
         f"{stats['documents_unchanged']} unchanged, {stats['documents_skipped']} skipped, "
-        f"{stats['documents_pruned']} pruned in {stats['elapsed_seconds']}s."
+        f"{stats['documents_failed']} failed, {stats['documents_pruned']} pruned in "
+        f"{stats['elapsed_seconds']}s (status: {stats['status']})."
     )
     return stats
 
@@ -106,29 +115,38 @@ async def _process_single_file(
 
     # Convert ISO modifiedTime string to datetime object for comparison
     drive_mtime = datetime.datetime.fromisoformat(file_meta.modified_time.replace("Z", "+00:00"))
+    current_model = f"{settings.EMBEDDING_PROVIDER}:{settings.EMBEDDING_MODEL}"
+    model_matched = existing_doc is not None and existing_doc.get("embedding_model") == current_model
 
-    if existing_doc and existing_doc.get("modified_time"):
+    if model_matched and existing_doc.get("modified_time"):
         db_mtime = existing_doc["modified_time"]
-        # If DB mtime is equal to or newer than Drive mtime, document hasn't changed
+        # If DB mtime is equal to or newer than Drive mtime and model matches, skip re-embedding
         if db_mtime >= drive_mtime:
-            logger.debug(f"[{label}] Document '{file_meta.name}' unchanged (mtime match).")
+            if existing_doc.get("drive_folder_id") != folder_id or existing_doc.get("name") != file_meta.name:
+                await update_document_metadata(file_meta.id, file_meta.name, folder_id)
+            logger.debug(f"[{label}] Document '{file_meta.name}' unchanged (mtime and model match).")
             return "unchanged"
 
     # Extract text from supported formats
     text = await fetch_file_text(file_meta)
     if not text or not text.strip():
         logger.debug(f"[{label}] Skipped '{file_meta.name}' (no extractable text).")
+        if existing_doc:
+            await delete_document(file_meta.id)
         return "skipped"
 
     content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    # Fast hash comparison if file was touched without text modifications
-    if existing_doc and existing_doc.get("content_hash") == content_hash:
-        logger.debug(f"[{label}] Document '{file_meta.name}' unchanged (content hash match).")
+    # Fast hash comparison if file was touched without text modifications and model matches
+    if model_matched and existing_doc.get("content_hash") == content_hash:
+        await update_document_metadata(file_meta.id, file_meta.name, folder_id, drive_mtime)
+        logger.debug(f"[{label}] Document '{file_meta.name}' unchanged (content hash and model match).")
         return "unchanged"
 
-    # Chunk the extracted text
-    text_chunks = chunker.chunk_document(file_meta.id, file_meta.name, text)
+    # Chunk the extracted text offloaded from the event loop
+    text_chunks = await asyncio.to_thread(
+        chunker.chunk_document, file_meta.id, file_meta.name, text
+    )
     if not text_chunks:
         return "skipped"
 
@@ -143,6 +161,10 @@ async def _process_single_file(
         batch = text_chunks[i:i + batch_size]
         texts_to_embed = [c.content for c in batch]
         embeddings = await embedder.embed_texts(texts_to_embed)
+        if len(embeddings) != len(batch):
+            raise RuntimeError(
+                f"Embedding count mismatch for '{file_meta.name}': expected {len(batch)}, got {len(embeddings)}"
+            )
 
         for c, emb in zip(batch, embeddings):
             chunk_data.append({
@@ -161,6 +183,7 @@ async def _process_single_file(
         drive_folder_id=folder_id,
         content_hash=content_hash,
         chunks=chunk_data,
+        embedding_model=current_model
     )
 
     return "processed"
@@ -199,6 +222,10 @@ async def run_full_sync() -> Dict[str, Any]:
         else:
             logger.info("TRAINING_DRIVE_FOLDER_ID not set. Skipping training sync.")
 
+        has_errors = any(
+            f.get("status") in ("error", "partial_failure") or f.get("documents_failed", 0) > 0
+            for f in results["folders"]
+        )
         results["total_elapsed_seconds"] = round(time.time() - start_overall, 2)
-        results["status"] = "completed"
+        results["status"] = "failed" if has_errors else "completed"
         return results

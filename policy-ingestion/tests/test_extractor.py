@@ -51,3 +51,39 @@ def test_warn_if_suspiciously_short_does_not_raise():
     # Should log warning but not raise exception
     _warn_if_suspiciously_short("sample.pdf", "tiny", "PDF")
     _warn_if_suspiciously_short("sample.docx", "a", "DOCX")
+
+
+@pytest.mark.asyncio
+async def test_docx_interleaved_order_preserved(monkeypatch):
+    import io
+    from docx import Document
+    from src.drive.extractor import MIME_DOCX
+
+    doc = Document()
+    doc.add_paragraph("Heading 1")
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Col A"
+    table.rows[0].cells[1].text = "Col B"
+    doc.add_paragraph("Heading 2")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    raw_docx = buf.getvalue()
+
+    async def mock_download(*args, **kwargs):
+        return raw_docx
+
+    async def mock_token():
+        return "fake-token"
+
+    monkeypatch.setattr("src.drive.extractor._download_binary", mock_download)
+    monkeypatch.setattr("src.drive.extractor.drive_client.get_access_token", mock_token)
+
+    meta = DriveFileMetadata(
+        id="doc-123",
+        name="policy.docx",
+        mime_type=MIME_DOCX,
+        modified_time="2026-01-01T00:00:00Z"
+    )
+    extracted = await fetch_file_text(meta)
+    assert extracted == "Heading 1\n\nCol A | Col B\n\nHeading 2"

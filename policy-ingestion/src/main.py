@@ -19,18 +19,16 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Set
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 from .config import settings
 from .db.client import (
     check_db_health,
     close_db_pool,
-    get_status_summary,
     init_db,
-    search_similar_chunks,
 )
 from .ingestion.embedder import embedder
 from .ingestion.pipeline import run_full_sync
@@ -43,17 +41,68 @@ logging.basicConfig(
 logger = logging.getLogger("policy_ingestion")
 
 scheduler = AsyncIOScheduler()
+_db_init_lock: Optional[asyncio.Lock] = None
+_db_init_loop: Optional[asyncio.AbstractEventLoop] = None
+_db_initialized: bool = False
+_background_tasks: Set[asyncio.Task] = set()
 
 
-async def verify_admin_auth(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")) -> None:
-    """Validates X-Admin-Key header when ADMIN_API_KEY is configured."""
-    if not settings.ADMIN_API_KEY:
+def _track_background_task(coro) -> asyncio.Task:
+    """Tracks background worker tasks to guarantee cancellation and await during shutdown."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+def _get_db_init_lock() -> asyncio.Lock:
+    """Returns the initialization lock bound to the running event loop."""
+    global _db_init_lock, _db_init_loop
+    try:
+        loop = asyncio.get_running_loop()
+        if _db_init_lock is None or _db_init_loop is not loop:
+            _db_init_lock = asyncio.Lock()
+            _db_init_loop = loop
+    except RuntimeError:
+        if _db_init_lock is None:
+            _db_init_lock = asyncio.Lock()
+            _db_init_loop = None
+    return _db_init_lock
+
+
+async def ensure_db_initialized() -> bool:
+    """Serializes database initialization across concurrent callers."""
+    global _db_initialized
+    if _db_initialized:
+        return True
+    async with _get_db_init_lock():
+        if _db_initialized:
+            return True
+        try:
+            await init_db()
+            _db_initialized = True
+            logger.info("Database schema initialized successfully.")
+            return True
+        except Exception as e:
+            logger.warning(f"Database schema initialization attempt failed: {e}")
+            return False
+
+
+async def _init_db_with_retry() -> None:
+    """Retries database initialization with exponential backoff on startup network failures."""
+    if _db_initialized:
         return
-    if not x_admin_key or x_admin_key != settings.ADMIN_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Admin-Key header",
+    retry_delays = [2, 5, 10, 30]
+    for attempt, delay in enumerate(retry_delays, start=1):
+        await asyncio.sleep(delay)
+        if await ensure_db_initialized():
+            return
+        logger.warning(
+            f"Database retry worker attempt {attempt}/{len(retry_delays)} failed. Retrying..."
         )
+
+    if not await ensure_db_initialized():
+        logger.error("Final database setup attempt in retry worker failed.")
 
 
 async def _startup_sync_worker() -> None:
@@ -61,6 +110,10 @@ async def _startup_sync_worker() -> None:
     retry_delays = [2, 15, 60]
     for attempt, delay in enumerate(retry_delays, start=1):
         await asyncio.sleep(delay)
+        if not await ensure_db_initialized():
+            logger.warning(f"Startup sync attempt {attempt} skipped: database uninitialized")
+            continue
+
         logger.info(f"Executing startup sync (attempt {attempt}/{len(retry_delays)})...")
         try:
             results = await run_full_sync()
@@ -73,22 +126,29 @@ async def _startup_sync_worker() -> None:
     logger.warning("Startup sync attempts completed. Scheduled interval will run normally.")
 
 
+async def _scheduled_sync_wrapper() -> None:
+    """Wrapper for recurring scheduler job, gating execution on database readiness."""
+    if not await ensure_db_initialized():
+        logger.warning("Scheduled Drive sync skipped: database schema is uninitialized.")
+        return
+    await run_full_sync()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for database initialization and background scheduler."""
     logger.info(f"Starting Policy Ingestion Service on port {settings.PORT}...")
 
-    # Initialize PostgreSQL and schema
-    try:
-        await init_db()
-    except Exception as e:
-        logger.error(f"Initial database setup encountered an error: {e}")
+    # Initialize PostgreSQL and schema with retry fallback
+    if not await ensure_db_initialized():
+        logger.warning("Initial database setup failed, starting background retry worker...")
+        _track_background_task(_init_db_with_retry())
 
     # Start recurring sync scheduler if enabled
     if settings.SYNC_ENABLED:
         interval_hours = max(1, settings.POLICY_SYNC_INTERVAL_HOURS)
         scheduler.add_job(
-            run_full_sync,
+            _scheduled_sync_wrapper,
             "interval",
             hours=interval_hours,
             id="policy_full_sync",
@@ -99,20 +159,24 @@ async def lifespan(app: FastAPI):
         logger.info(f"Scheduled periodic Drive sync every {interval_hours} hour(s).")
 
         if settings.SYNC_ON_STARTUP:
-            asyncio.create_task(_startup_sync_worker())
+            _track_background_task(_startup_sync_worker())
 
     yield
 
-    # Clean shutdown
+    # Clean shutdown: cancel and await all background workers before closing pool
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    for task in list(_background_tasks):
+        task.cancel()
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
     await close_db_pool()
     logger.info("Policy Ingestion Service stopped.")
 
 
 app = FastAPI(
     title="WSO2 Policy Ingestion Service",
-    description="Extracts documents from Google Drive, chunks, embeds, and stores in pgvector.",
+    description="Automated background service for syncing and embedding HR policy documents into pgvector.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -131,30 +195,9 @@ class ReadyResponse(BaseModel):
     database: str = Field("connected", description="Database connection status")
 
 
-class FolderSummary(BaseModel):
-    drive_folder_id: str = Field(..., description="Google Drive folder identifier")
-    doc_count: int = Field(..., description="Count of documents indexed from folder")
-
-
-class AdminStatusResponse(BaseModel):
-    total_documents: int = Field(..., description="Total documents in pgvector")
-    total_chunks: int = Field(..., description="Total chunks in pgvector")
-    folders: List[FolderSummary] = Field(default_factory=list, description="Stats per folder")
-    last_synced_at: Optional[str] = Field(None, description="ISO timestamp of last successful sync")
-    sync_scheduler_running: bool = Field(..., description="Status of APScheduler")
-    sync_interval_hours: int = Field(..., description="Scheduled interval in hours")
-
-
-class SyncResponse(BaseModel):
-    status: str = Field(..., description="Sync execution status (accepted or completed)")
-    message: Optional[str] = Field(None, description="Status detail message")
-    folders: Optional[List[Dict[str, Any]]] = Field(None, description="Detailed folder sync stats")
-    total_elapsed_seconds: Optional[float] = Field(None, description="Total execution duration")
-
-
 class EmbedRequest(BaseModel):
-    text: Optional[str] = Field(None, description="Single text string to embed")
-    texts: Optional[List[str]] = Field(None, description="Batch of texts to embed")
+    text: Optional[str] = Field(None, max_length=10000, description="Single text string to embed (max 10,000 chars)")
+    texts: Optional[List[str]] = Field(None, max_length=100, description="Batch of texts to embed (max 100 items)")
 
 
 class EmbedResponse(BaseModel):
@@ -162,26 +205,6 @@ class EmbedResponse(BaseModel):
     dimension: Optional[int] = Field(None, description="Vector dimension")
     embeddings: Optional[List[List[float]]] = Field(None, description="Vectors for batch input")
     count: Optional[int] = Field(None, description="Number of embeddings generated")
-
-
-class SearchRequest(BaseModel):
-    query: str = Field(..., description="Natural language question or search text")
-    drive_folder_id: Optional[str] = Field(None, description="Filter by specific folder ID")
-    top_k: int = Field(5, ge=1, le=20, description="Max number of excerpts to return")
-
-
-class SearchResultItem(BaseModel):
-    document_name: str = Field(..., description="Source document file name")
-    excerpt: str = Field(..., description="Text chunk content")
-    chunk_index: int = Field(..., description="Sequential chunk index")
-    drive_folder_id: str = Field(..., description="Google Drive folder identifier")
-    similarity_score: float = Field(..., description="Cosine similarity score (0.0 to 1.0)")
-
-
-class SearchResponse(BaseModel):
-    query: str = Field(..., description="Original search query")
-    results_count: int = Field(..., description="Number of results returned")
-    results: List[SearchResultItem] = Field(default_factory=list, description="Ranked results")
 
 
 # --- Endpoints ---
@@ -195,7 +218,13 @@ async def health() -> HealthResponse:
 
 @app.get("/ready", response_model=ReadyResponse, tags=["Monitoring"])
 async def ready() -> ReadyResponse:
-    """Readiness probe verifying database connectivity."""
+    """Readiness probe verifying database connectivity and schema readiness."""
+    if not _db_initialized:
+        if not await ensure_db_initialized():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database schema initialization failed",
+            )
     is_healthy = await check_db_health()
     if not is_healthy:
         raise HTTPException(
@@ -205,100 +234,23 @@ async def ready() -> ReadyResponse:
     return ReadyResponse(status="ready", database="connected")
 
 
-@app.get(
-    "/admin/status",
-    response_model=AdminStatusResponse,
-    dependencies=[Depends(verify_admin_auth)],
-    tags=["Admin"]
-)
-async def admin_status() -> AdminStatusResponse:
-    """Returns database summary: document and chunk counts per folder."""
-    try:
-        summary = await get_status_summary()
-        summary["sync_scheduler_running"] = scheduler.running
-        summary["sync_interval_hours"] = settings.POLICY_SYNC_INTERVAL_HOURS
-        return AdminStatusResponse(**summary)
-    except Exception as e:
-        logger.error(f"Failed to fetch admin status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post(
-    "/admin/sync",
-    response_model=SyncResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(verify_admin_auth)],
-    tags=["Admin"]
-)
-async def trigger_sync(
-    background_tasks: BackgroundTasks,
-    response: Response,
-    wait: bool = False
-) -> SyncResponse:
-    """
-    Manually triggers full Google Drive synchronization.
-    If wait=True, blocks until sync completes and returns stats with HTTP 200.
-    """
-    if wait:
-        results = await run_full_sync()
-        response.status_code = status.HTTP_200_OK
-        return SyncResponse(
-            status=results.get("status", "completed"),
-            folders=results.get("folders"),
-            total_elapsed_seconds=results.get("total_elapsed_seconds"),
-        )
-
-    background_tasks.add_task(run_full_sync)
-    return SyncResponse(
-        status="accepted",
-        message="Drive synchronization scheduled in background",
-    )
-
-
 @app.post("/embed", response_model=EmbedResponse, tags=["Utility"])
 async def embed_endpoint(payload: EmbedRequest) -> EmbedResponse:
     """
-    Utility endpoint providing query and text embeddings.
-    Can be leveraged directly by the Policy MCP or test runners.
+    Internal embedding endpoint providing query and text vectorization.
+    Consumed by the Policy MCP server to perform vector similarity search.
     """
     if payload.text:
         vector = await embedder.embed_query(payload.text)
         return EmbedResponse(embedding=vector, dimension=len(vector))
     elif payload.texts:
+        for t in payload.texts:
+            if len(t) > 10000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Individual text in batch exceeds maximum length of 10,000 characters",
+                )
         vectors = await embedder.embed_texts(payload.texts)
         return EmbedResponse(embeddings=vectors, count=len(vectors))
     else:
         raise HTTPException(status_code=400, detail="Either 'text' or 'texts' is required")
-
-
-@app.post("/search", response_model=SearchResponse, tags=["Search"])
-async def search_endpoint(payload: SearchRequest) -> SearchResponse:
-    """
-    Direct semantic vector search against policy chunks.
-    Validates end-to-end embedding and pgvector cosine ranking.
-    """
-    try:
-        query_vector = await embedder.embed_query(payload.query)
-        results = await search_similar_chunks(
-            embedding=query_vector,
-            drive_folder_id=payload.drive_folder_id,
-            top_k=payload.top_k,
-        )
-        search_items = [
-            SearchResultItem(
-                document_name=r["document_name"],
-                excerpt=r["excerpt"],
-                chunk_index=r["chunk_index"],
-                drive_folder_id=r["drive_folder_id"],
-                similarity_score=float(r["similarity_score"]),
-            )
-            for r in results
-        ]
-        return SearchResponse(
-            query=payload.query,
-            results_count=len(search_items),
-            results=search_items,
-        )
-    except Exception as e:
-        logger.error(f"Search endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))

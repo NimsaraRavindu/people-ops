@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
+	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/auth"
 	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/db"
 	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/embedding"
 	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/handler"
@@ -49,10 +50,9 @@ func main() {
 	}
 
 	// Initialize embedding client
-	isDev := os.Getenv("ENV") != "production"
 	embedder := embedding.NewClient(embedding.Config{
 		IngestionURL:      os.Getenv("POLICY_INGESTION_URL"),
-		AllowMockFallback: isDev,
+		AllowMockFallback: auth.IsPermittedDevEnvironment(),
 	})
 
 	// Resolve Drive folder IDs

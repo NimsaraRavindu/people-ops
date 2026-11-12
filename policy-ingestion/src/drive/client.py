@@ -102,6 +102,8 @@ class GoogleDriveClient:
                     "q": f"'{folder_id}' in parents and trashed = false",
                     "fields": "files(id,name,mimeType,modifiedTime),nextPageToken",
                     "pageSize": 100,
+                    "supportsAllDrives": "true",
+                    "includeItemsFromAllDrives": "true",
                 }
                 if page_token:
                     params["pageToken"] = page_token
