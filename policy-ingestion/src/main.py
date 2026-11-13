@@ -21,7 +21,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional, Set
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from .config import settings
@@ -45,6 +45,31 @@ _db_init_lock: Optional[asyncio.Lock] = None
 _db_init_loop: Optional[asyncio.AbstractEventLoop] = None
 _db_initialized: bool = False
 _background_tasks: Set[asyncio.Task] = set()
+_embed_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_embed_semaphore() -> asyncio.Semaphore:
+    """Returns the embedding concurrency semaphore bound to the event loop."""
+    global _embed_semaphore
+    if _embed_semaphore is None:
+        _embed_semaphore = asyncio.Semaphore(10)
+    return _embed_semaphore
+
+
+def _verify_internal_auth(request: Request) -> None:
+    """Validates shared secret token if POLICY_INGESTION_SECRET is configured."""
+    if not settings.POLICY_INGESTION_SECRET:
+        return
+    token = request.headers.get("X-Internal-Token") or ""
+    if not token and "Authorization" in request.headers:
+        auth_h = request.headers["Authorization"]
+        if auth_h.startswith("Bearer "):
+            token = auth_h[7:].strip()
+    if token != settings.POLICY_INGESTION_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: invalid internal service token",
+        )
 
 
 def _track_background_task(coro) -> asyncio.Task:
@@ -197,7 +222,7 @@ class ReadyResponse(BaseModel):
 
 class EmbedRequest(BaseModel):
     text: Optional[str] = Field(None, max_length=10000, description="Single text string to embed (max 10,000 chars)")
-    texts: Optional[List[str]] = Field(None, max_length=100, description="Batch of texts to embed (max 100 items)")
+    texts: Optional[List[str]] = Field(None, max_length=50, description="Batch of texts to embed (max 50 items)")
 
 
 class EmbedResponse(BaseModel):
@@ -235,22 +260,24 @@ async def ready() -> ReadyResponse:
 
 
 @app.post("/embed", response_model=EmbedResponse, tags=["Utility"])
-async def embed_endpoint(payload: EmbedRequest) -> EmbedResponse:
+async def embed_endpoint(payload: EmbedRequest, request: Request) -> EmbedResponse:
     """
     Internal embedding endpoint providing query and text vectorization.
     Consumed by the Policy MCP server to perform vector similarity search.
     """
-    if payload.text:
-        vector = await embedder.embed_query(payload.text)
-        return EmbedResponse(embedding=vector, dimension=len(vector))
-    elif payload.texts:
-        for t in payload.texts:
-            if len(t) > 10000:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Individual text in batch exceeds maximum length of 10,000 characters",
-                )
-        vectors = await embedder.embed_texts(payload.texts)
-        return EmbedResponse(embeddings=vectors, count=len(vectors))
-    else:
-        raise HTTPException(status_code=400, detail="Either 'text' or 'texts' is required")
+    _verify_internal_auth(request)
+    async with _get_embed_semaphore():
+        if payload.text:
+            vector = await embedder.embed_query(payload.text)
+            return EmbedResponse(embedding=vector, dimension=len(vector))
+        elif payload.texts:
+            for t in payload.texts:
+                if len(t) > 10000:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Individual text in batch exceeds maximum length of 10,000 characters",
+                    )
+            vectors = await embedder.embed_texts(payload.texts)
+            return EmbedResponse(embeddings=vectors, count=len(vectors))
+        else:
+            raise HTTPException(status_code=400, detail="Either 'text' or 'texts' is required")

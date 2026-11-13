@@ -43,6 +43,7 @@ SUPPORTED_MIME_TYPES = {
 }
 
 SUSPICIOUS_TEXT_THRESHOLD = 50
+MAX_BINARY_FILE_SIZE = 25 * 1024 * 1024  # 25 MB safety limit to protect against OOM
 
 
 async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
@@ -141,6 +142,17 @@ async def _download_binary(file_id: str, headers: dict) -> bytes:
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Failed to download binary file ({file_id}): {resp.status_code} - {resp.text}"
+            )
+        content_length = resp.headers.get("Content-Length")
+        if content_length and int(content_length) > MAX_BINARY_FILE_SIZE:
+            raise ValueError(
+                f"File {file_id} exceeds maximum permitted binary download size "
+                f"({content_length} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
+            )
+        if len(resp.content) > MAX_BINARY_FILE_SIZE:
+            raise ValueError(
+                f"File {file_id} exceeds maximum permitted binary download size "
+                f"({len(resp.content)} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
             )
         return resp.content
 

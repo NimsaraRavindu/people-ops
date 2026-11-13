@@ -27,11 +27,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/auth"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/buckets"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/db"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/embedding"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/model"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/auth"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/buckets"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/db"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/embedding"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/model"
 )
 
 var validToolNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)

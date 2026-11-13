@@ -38,28 +38,42 @@ func TestGenerateMockEmbedding(t *testing.T) {
 }
 
 func TestEmbedViaIngestion(t *testing.T) {
+	var capturedToken string
 	mockRT := roundTripFunc(func(req *http.Request) *http.Response {
+		capturedToken = req.Header.Get("X-Internal-Token")
 		if req.URL.Path != "/embed" {
 			return &http.Response{StatusCode: http.StatusNotFound}
 		}
+		vec := make([]float32, 768)
+		vec[0] = 0.1
+		var buf bytes.Buffer
+		buf.WriteString(`{"embedding":[0.1`)
+		for i := 1; i < 768; i++ {
+			buf.WriteString(`,0.0`)
+		}
+		buf.WriteString(`]}`)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewBufferString(`{"embedding":[0.1, 0.2, 0.3]}`)),
+			Body:       io.NopCloser(&buf),
 			Header:     make(http.Header),
 		}
 	})
 
 	client := NewClient(Config{
-		IngestionURL: "http://mock-ingestion:8080",
-		HTTPClient:   &http.Client{Transport: mockRT},
+		IngestionURL:    "http://mock-ingestion:8080",
+		IngestionSecret: "secret-test-key",
+		HTTPClient:      &http.Client{Transport: mockRT},
 	})
 
 	vec, err := client.EmbedQuery(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(vec) != 3 || vec[0] != 0.1 {
-		t.Fatalf("unexpected embedding vector: %v", vec)
+	if len(vec) != 768 || vec[0] != 0.1 {
+		t.Fatalf("unexpected embedding vector length: %d", len(vec))
+	}
+	if capturedToken != "secret-test-key" {
+		t.Fatalf("expected X-Internal-Token header, got %s", capturedToken)
 	}
 }
 

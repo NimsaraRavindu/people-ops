@@ -19,6 +19,7 @@
 import os
 from typing import Optional
 from urllib.parse import parse_qs, quote_plus, urlparse
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,9 +27,21 @@ class Settings(BaseSettings):
     """Configuration loaded from environment variables and .env file."""
 
     # Server Configuration
+    ENV: Optional[str] = None
     ENVIRONMENT: str = "development"
     PORT: int = 8080
     LOG_LEVEL: str = "info"
+
+    _explicit_env: bool = PrivateAttr(default=False)
+    _explicit_environment: bool = PrivateAttr(default=False)
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        self._explicit_env = "ENV" in self.model_fields_set
+        self._explicit_environment = "ENVIRONMENT" in self.model_fields_set
+        # When ENV is explicitly configured and ENVIRONMENT is not, adopt ENV
+        if self._explicit_env and not self._explicit_environment and self.ENV:
+            self.ENVIRONMENT = self.ENV
 
     # Database Configuration (PostgreSQL with pgvector)
     DATABASE_URL: Optional[str] = None
@@ -59,6 +72,7 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 768
     GOOGLE_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    POLICY_INGESTION_SECRET: Optional[str] = None
 
     # Sync Cadence & Triggers
     SYNC_ENABLED: bool = True
@@ -102,7 +116,26 @@ class Settings(BaseSettings):
 
     def get_database_dsn(self) -> str:
         """Constructs an asyncpg DSN connection string with verified TLS in production."""
-        is_prod = self.ENVIRONMENT.lower() in ("production", "prod")
+        raw_env = self.ENV or os.getenv("ENV") or ""
+        raw_environment = self.ENVIRONMENT or os.getenv("ENVIRONMENT") or ""
+
+        env_val = raw_env.lower().strip()
+        environment_val = raw_environment.lower().strip()
+
+        is_env_prod = env_val in ("production", "prod")
+        is_env_dev = env_val in ("development", "dev", "test", "testing", "local")
+        is_environment_prod = environment_val in ("production", "prod")
+        is_environment_dev = environment_val in ("development", "dev", "test", "testing", "local")
+
+        # Reject conflicting environment settings only when both are explicitly configured
+        if self._explicit_env and self._explicit_environment:
+            if (is_env_prod and is_environment_dev) or (is_env_dev and is_environment_prod):
+                raise ValueError(
+                    f"Conflicting environment settings: ENV='{raw_env}' and "
+                    f"ENVIRONMENT='{raw_environment}' cannot specify opposing modes."
+                )
+
+        is_prod = is_env_prod or is_environment_prod
 
         if self.DATABASE_URL:
             dsn = self.DATABASE_URL
@@ -112,6 +145,11 @@ class Settings(BaseSettings):
                 parsed = urlparse(dsn)
                 params = parse_qs(parsed.query)
                 ssl_modes = params.get("sslmode", [])
+                if len(ssl_modes) > 1:
+                    raise ValueError(
+                        f"Insecure database connection rejected: duplicate sslmode parameters "
+                        f"in DATABASE_URL are not permitted ({ssl_modes})."
+                    )
                 ssl_mode = ssl_modes[0].lower().strip() if ssl_modes else None
                 if ssl_mode != "verify-full":
                     raise ValueError(

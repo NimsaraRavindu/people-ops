@@ -16,6 +16,7 @@
 
 # Google Drive API client using OAuth 2.0 user refresh token.
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -45,6 +46,12 @@ class GoogleDriveClient:
     def __init__(self):
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
+        self._token_lock: Optional[asyncio.Lock] = None
+
+    def _get_token_lock(self) -> asyncio.Lock:
+        if self._token_lock is None:
+            self._token_lock = asyncio.Lock()
+        return self._token_lock
 
     async def get_access_token(self) -> str:
         """Obtains a valid access token, refreshing automatically if expired."""
@@ -52,39 +59,44 @@ class GoogleDriveClient:
         if self._access_token and now < (self._token_expires_at - 60):
             return self._access_token
 
-        client_id = settings.oauth_client_id
-        client_secret = settings.oauth_client_secret
-        refresh_token = settings.oauth_refresh_token
+        async with self._get_token_lock():
+            now = time.time()
+            if self._access_token and now < (self._token_expires_at - 60):
+                return self._access_token
 
-        if not all([client_id, client_secret, refresh_token]):
-            raise ValueError(
-                "Missing Google Drive OAuth credentials: "
-                "client_id, client_secret, and refresh_token are required."
-            )
+            client_id = settings.oauth_client_id
+            client_secret = settings.oauth_client_secret
+            refresh_token = settings.oauth_refresh_token
 
-        logger.info("Refreshing Google Drive OAuth access token...")
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            resp = await http.post(
-                OAUTH_TOKEN_URL,
-                data={
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "refresh_token": refresh_token,
-                    "grant_type": "refresh_token",
-                },
-            )
-
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to refresh Google Drive token: {resp.status_code} - {resp.text}"
+            if not all([client_id, client_secret, refresh_token]):
+                raise ValueError(
+                    "Missing Google Drive OAuth credentials: "
+                    "client_id, client_secret, and refresh_token are required."
                 )
 
-            data = resp.json()
-            self._access_token = data["access_token"]
-            expires_in = int(data.get("expires_in", 3600))
-            self._token_expires_at = now + expires_in
-            logger.info("Successfully refreshed Google Drive access token.")
-            return self._access_token
+            logger.info("Refreshing Google Drive OAuth access token...")
+            async with httpx.AsyncClient(timeout=15.0) as http:
+                resp = await http.post(
+                    OAUTH_TOKEN_URL,
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                )
+
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Failed to refresh Google Drive token: {resp.status_code} - {resp.text}"
+                    )
+
+                data = resp.json()
+                self._access_token = data["access_token"]
+                expires_in = int(data.get("expires_in", 3600))
+                self._token_expires_at = now + expires_in
+                logger.info("Successfully refreshed Google Drive access token.")
+                return self._access_token
 
     async def list_folder_files(self, folder_id: str) -> List[DriveFileMetadata]:
         """

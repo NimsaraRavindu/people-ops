@@ -37,6 +37,7 @@ type Embedder interface {
 // Config encapsulates configuration parameters for vector embedding clients.
 type Config struct {
 	IngestionURL      string
+	IngestionSecret   string
 	AllowMockFallback bool
 	HTTPClient        *http.Client
 }
@@ -85,6 +86,9 @@ func (c *Client) embedViaIngestion(ctx context.Context, text string) ([]float32,
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.cfg.IngestionSecret != "" {
+		req.Header.Set("X-Internal-Token", c.cfg.IngestionSecret)
+	}
 
 	resp, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
@@ -101,6 +105,12 @@ func (c *Client) embedViaIngestion(ctx context.Context, text string) ([]float32,
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
 		return nil, err
+	}
+	if len(embedResp.Embedding) != 768 {
+		return nil, fmt.Errorf(
+			"unexpected embedding dimension from ingestion service: %d (expected 768)",
+			len(embedResp.Embedding),
+		)
 	}
 	return embedResp.Embedding, nil
 }

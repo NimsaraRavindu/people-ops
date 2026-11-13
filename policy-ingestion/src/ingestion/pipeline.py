@@ -83,12 +83,19 @@ async def sync_drive_folder(folder_id: str, label: str = "Folder") -> Dict[str, 
             logger.error(f"[{label}] Error processing file '{file_meta.name}' ({file_meta.id}): {e}")
             stats["documents_failed"] += 1
 
-    # Prune documents removed from Google Drive
-    active_doc_ids = [f.id for f in files]
-    pruned_count = await prune_missing_documents(folder_id, active_doc_ids)
-    stats["documents_pruned"] = pruned_count
-    if pruned_count > 0:
-        logger.info(f"[{label}] Pruned {pruned_count} deleted documents from vector database.")
+    # Prune documents removed from Google Drive only when listing succeeded and no file processing errors occurred
+    if stats["documents_failed"] == 0 and len(files) > 0:
+        active_doc_ids = [f.id for f in files]
+        pruned_count = await prune_missing_documents(folder_id, active_doc_ids)
+        stats["documents_pruned"] = pruned_count
+        if pruned_count > 0:
+            logger.info(f"[{label}] Pruned {pruned_count} deleted documents from vector database.")
+    else:
+        stats["documents_pruned"] = 0
+        if stats["documents_failed"] > 0:
+            logger.warning(
+                f"[{label}] Skipping document pruning due to {stats['documents_failed']} failed file(s)."
+            )
 
     stats["elapsed_seconds"] = round(time.time() - start_time, 2)
     if stats["documents_failed"] > 0:

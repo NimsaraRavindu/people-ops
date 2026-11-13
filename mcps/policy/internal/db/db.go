@@ -26,7 +26,7 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/model"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/model"
 )
 
 // Searcher defines database operations for policy vector similarity searches.

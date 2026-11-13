@@ -16,7 +16,7 @@
 
 package buckets
 
-import "github.com/wso2-enterprise/people-ops/mcps/policy/internal/model"
+import "github.com/wso2-open-operations/people-ops/mcps/policy/internal/model"
 
 // GetPolicyBucket returns the PO_POLICIES capability bucket kit.
 func GetPolicyBucket() model.BucketKit {

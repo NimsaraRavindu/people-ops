@@ -278,3 +278,95 @@ async def test_lifespan_shutdown_cancels_and_awaits_background_workers():
         assert task.cancelled()
         assert task not in _background_tasks
         mock_close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_active_sync_finishes_before_pool_closed():
+    from src.main import lifespan, app, _background_tasks, _track_background_task
+
+    pool_closed = False
+    active_sync_in_progress = False
+    sync_cleanup_completed = False
+    cleanup_happened_while_pool_open = False
+
+    async def fake_close_db_pool():
+        nonlocal pool_closed
+        pool_closed = True
+
+    async def active_sync_worker():
+        nonlocal active_sync_in_progress, sync_cleanup_completed, cleanup_happened_while_pool_open
+        active_sync_in_progress = True
+        try:
+            # Simulate active document extraction & chunk embedding loop
+            while True:
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            # Simulate in-flight database transaction rollback / buffer flush
+            await asyncio.sleep(0.03)
+            sync_cleanup_completed = True
+            if not pool_closed:
+                cleanup_happened_while_pool_open = True
+            raise
+
+    with patch("src.main.ensure_db_initialized", new_callable=AsyncMock, return_value=True), \
+         patch("src.main.close_db_pool", side_effect=fake_close_db_pool), \
+         patch("src.config.settings.SYNC_ENABLED", False):
+        async with lifespan(app):
+            task = _track_background_task(active_sync_worker())
+            await asyncio.sleep(0.02)
+            assert active_sync_in_progress
+            assert task in _background_tasks
+            assert not task.done()
+            assert not pool_closed
+
+        # Verify task was awaited and cleanup finished BEFORE pool was closed
+        assert sync_cleanup_completed, "Active sync cleanup must complete on cancellation"
+        assert cleanup_happened_while_pool_open, (
+            "Worker cleanup must finish before close_db_pool is called"
+        )
+        assert pool_closed, "Database pool must be closed after workers finish"
+        assert task.done()
+        assert task.cancelled()
+        assert task not in _background_tasks
+
+
+@pytest.mark.asyncio
+async def test_embed_internal_auth_protection():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("src.main.settings.POLICY_INGESTION_SECRET", "super-secret-key"):
+            # 1. No token -> 401
+            res = await client.post("/embed", json={"text": "hello"})
+            assert res.status_code == 401
+
+            # 2. Wrong token -> 401
+            res = await client.post("/embed", json={"text": "hello"}, headers={"X-Internal-Token": "wrong"})
+            assert res.status_code == 401
+
+            # 3. Valid X-Internal-Token -> 200
+            with patch("src.main.embedder.embed_query", new_callable=AsyncMock, return_value=[0.1] * 768):
+                res = await client.post(
+                    "/embed",
+                    json={"text": "hello"},
+                    headers={"X-Internal-Token": "super-secret-key"},
+                )
+                assert res.status_code == 200
+
+            # 4. Valid Bearer Token -> 200
+            with patch("src.main.embedder.embed_query", new_callable=AsyncMock, return_value=[0.1] * 768):
+                res = await client.post(
+                    "/embed",
+                    json={"text": "hello"},
+                    headers={"Authorization": "Bearer super-secret-key"},
+                )
+                assert res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_embed_batch_limit_rejection():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Batch exceeding 50 items rejected
+        too_many = ["chunk"] * 51
+        res = await client.post("/embed", json={"texts": too_many})
+        assert res.status_code == 422

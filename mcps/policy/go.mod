@@ -1,4 +1,4 @@
-module github.com/wso2-enterprise/people-ops/mcps/policy
+module github.com/wso2-open-operations/people-ops/mcps/policy
 
 go 1.27
 

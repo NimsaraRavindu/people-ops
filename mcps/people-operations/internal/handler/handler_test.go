@@ -26,11 +26,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validTestJWT() string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
-	p := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"user@example.com","sub":"user-123"}`))
+	p := base64.RawURLEncoding.EncodeToString(
+		[]byte(fmt.Sprintf(`{"email":"user@example.com","sub":"user-123","exp":%d}`, time.Now().Add(time.Hour).Unix())),
+	)
 	return h + "." + p + ".test-sig"
 }
 

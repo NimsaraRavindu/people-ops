@@ -73,3 +73,68 @@ def test_unsupported_ssl_mode_raises():
     cfg = Settings(ENVIRONMENT="development", DB_SSL="bogus_ssl", DATABASE_URL=None)
     with pytest.raises(ValueError, match="Unsupported DB_SSL mode"):
         cfg.get_database_dsn()
+
+
+@pytest.mark.parametrize("insecure_url", [
+    "postgresql://user:pass@localhost:5432/db?sslmode=verify-full&sslmode=disable",
+    "postgresql://user:pass@localhost:5432/db?sslmode=verify-full&sslmode=require",
+    "postgresql://user:pass@localhost:5432/db?sslmode=disable&sslmode=verify-full",
+    "postgresql://user:pass@localhost:5432/db?sslmode=verify-full&sslmode=verify-full",
+])
+def test_production_rejects_duplicate_sslmode_in_database_url(insecure_url: str):
+    cfg = Settings(ENVIRONMENT="production", DATABASE_URL=insecure_url)
+    with pytest.raises(ValueError, match="duplicate sslmode parameters in DATABASE_URL are not permitted"):
+        cfg.get_database_dsn()
+
+
+def test_conflicting_environment_settings_rejected(monkeypatch):
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    cfg = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=None)
+    with pytest.raises(ValueError, match="Conflicting environment settings"):
+        cfg.get_database_dsn()
+
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    cfg2 = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=None)
+    with pytest.raises(ValueError, match="Conflicting environment settings"):
+        cfg2.get_database_dsn()
+
+
+def test_dotenv_production_with_process_env_development_raises_conflict(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ENVIRONMENT=production\n")
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    cfg = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=str(env_file))
+    with pytest.raises(ValueError, match="Conflicting environment settings"):
+        cfg.get_database_dsn()
+
+
+def test_dotenv_development_with_process_env_production_raises_conflict(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ENVIRONMENT=development\n")
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    cfg = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=str(env_file))
+    with pytest.raises(ValueError, match="Conflicting environment settings"):
+        cfg.get_database_dsn()
+
+
+def test_env_production_alone_activates_verify_full(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    # ENVIRONMENT is unset (isolated from .env), so it defaults to development unless adopted from ENV.
+    # ENV=production alone must activate verify-full without raising a conflict against the default.
+    cfg = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=None)
+    assert cfg.ENVIRONMENT == "production"
+    dsn = cfg.get_database_dsn()
+    assert "sslmode=verify-full" in dsn
+
+
+def test_environment_production_activates_tls_when_env_unset(monkeypatch):
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    cfg = Settings(DB_SSL=None, DATABASE_URL=None, _env_file=None)
+    dsn = cfg.get_database_dsn()
+    assert "sslmode=verify-full" in dsn

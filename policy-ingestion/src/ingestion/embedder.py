@@ -85,11 +85,10 @@ class TextEmbedder:
         elif self.provider == "dummy":
             return self._embed_dummy(texts)
         else:
-            logger.warning(
-                "Unknown embedding provider '%s', defaulting to local FastEmbed.",
-                self.provider,
+            raise ValueError(
+                f"Unsupported EMBEDDING_PROVIDER '{self.provider}'. "
+                f"Supported providers: 'local', 'fastembed', 'dummy'."
             )
-            return await self._embed_local(texts)
 
     async def _embed_local(self, texts: List[str]) -> List[List[float]]:
         """Generates embeddings locally on CPU using FastEmbed ONNX runtime."""
@@ -102,7 +101,12 @@ class TextEmbedder:
         # Offload ONNX CPU compute to a worker thread to keep the asyncio event loop responsive
         def _compute() -> List[List[float]]:
             embeddings_generator = model.embed(texts)
-            return [e.tolist() for e in embeddings_generator]
+            results = [e.tolist() for e in embeddings_generator]
+            if results and len(results[0]) != self.dimension:
+                raise ValueError(
+                    f"Model embedding dimension mismatch: expected {self.dimension}, got {len(results[0])}"
+                )
+            return results
 
         return await asyncio.to_thread(_compute)
 

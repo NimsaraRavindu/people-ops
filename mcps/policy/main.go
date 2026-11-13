@@ -18,16 +18,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/auth"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/db"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/embedding"
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/handler"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/auth"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/db"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/embedding"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/handler"
 )
 
 func main() {
@@ -45,13 +49,13 @@ func main() {
 	if err != nil {
 		slog.Error("Database connection initialization warning (health check will report degraded)", "error", err)
 	} else {
-		defer pgVectorDB.Close()
 		slog.Info("Connected to PostgreSQL pgvector database successfully.")
 	}
 
 	// Initialize embedding client
 	embedder := embedding.NewClient(embedding.Config{
 		IngestionURL:      os.Getenv("POLICY_INGESTION_URL"),
+		IngestionSecret:   os.Getenv("POLICY_INGESTION_SECRET"),
 		AllowMockFallback: auth.IsPermittedDevEnvironment(),
 	})
 
@@ -75,9 +79,40 @@ func main() {
 	mux.HandleFunc("/tools/", h.Tools)
 
 	port := getEnv("PORT", "8003")
-	slog.Info("Policy MCP Server starting", "port", port, "env", os.Getenv("ENV"))
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		slog.Info("Policy MCP Server starting", "port", port, "env", os.Getenv("ENV"))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Server listen failed: %v", err)
+		}
+	}()
+
+	<-stop
+	slog.Info("Shutting down Policy MCP server gracefully...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("Server forced shutdown", "error", err)
+	} else {
+		slog.Info("Policy MCP server stopped cleanly")
+	}
+
+	if pgVectorDB != nil {
+		pgVectorDB.Close()
 	}
 }
 

@@ -25,7 +25,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wso2-enterprise/people-ops/mcps/policy/internal/model"
+	"github.com/wso2-open-operations/people-ops/mcps/policy/internal/model"
 )
 
 type mockEmbedder struct {
