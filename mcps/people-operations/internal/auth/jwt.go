@@ -43,12 +43,13 @@ type jwksURLCache struct {
 }
 
 var (
-	jwksCacheLock  sync.RWMutex
-	jwksFetchSem   = make(chan struct{}, 1)
-	jwksURLCaches  = make(map[string]*jwksURLCache)
-	jwksCacheTTL   = 1 * time.Hour
-	minJWKSRefetch = 1 * time.Minute
-	jwksClient     = &http.Client{Timeout: 5 * time.Second}
+	jwksCacheLock   sync.RWMutex
+	jwksFetchSem    = make(chan struct{}, 1)
+	jwksURLCaches   = make(map[string]*jwksURLCache)
+	jwksCacheTTL    = 1 * time.Hour
+	maxStaleJWKSAge = 24 * time.Hour
+	minJWKSRefetch  = 1 * time.Minute
+	jwksClient      = &http.Client{Timeout: 5 * time.Second}
 )
 
 // ResetJWKSCache clears all cached JWKS keys and fetch timestamps (primarily for tests).
@@ -178,15 +179,16 @@ func lookupCachedKey(jwksURL string, kid string) (*rsa.PublicKey, bool, bool) {
 
 	expired := time.Since(cache.lastSuccess) > jwksCacheTTL
 	cooldown := !cache.lastAttempt.IsZero() && time.Since(cache.lastAttempt) < minJWKSRefetch
+	withinStaleBound := time.Since(cache.lastSuccess) <= maxStaleJWKSAge
 
 	if kid != "" {
 		if pub, ok := cache.keys[kid]; ok {
-			if !expired || cooldown {
+			if (!expired || cooldown) && withinStaleBound {
 				return pub, true, false
 			}
 		}
 	} else if len(cache.keysList) == 1 {
-		if !expired || cooldown {
+		if (!expired || cooldown) && withinStaleBound {
 			return cache.keysList[0], true, false
 		}
 	}
@@ -227,10 +229,10 @@ func getPublicKey(ctx context.Context, jwksURL string, kid string) (*rsa.PublicK
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// Fall back to stale cache on network failure if available
+		// Fall back to stale cache on network failure if available and within maxStaleJWKSAge
 		jwksCacheLock.RLock()
 		cache := jwksURLCaches[jwksURL]
-		if cache != nil {
+		if cache != nil && time.Since(cache.lastSuccess) <= maxStaleJWKSAge {
 			if kid != "" {
 				if pub, ok := cache.keys[kid]; ok {
 					jwksCacheLock.RUnlock()
@@ -266,9 +268,9 @@ func getPublicKey(ctx context.Context, jwksURL string, kid string) (*rsa.PublicK
 	return nil, fmt.Errorf("key with kid %q not found in JWKS %s", kid, jwksURL)
 }
 
-// isPermittedDevEnvironment returns true ONLY if a permitted dev/test environment is explicitly set
+// IsPermittedDevEnvironment returns true ONLY if a permitted dev/test environment is explicitly set
 // and no production, staging, or QA environment indicator is present.
-func isPermittedDevEnvironment() bool {
+func IsPermittedDevEnvironment() bool {
 	hasDev := false
 	for _, key := range []string{"ENVIRONMENT", "ENV", "APP_ENV"} {
 		val := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
@@ -291,7 +293,7 @@ func isPermittedDevEnvironment() bool {
 // isTokenValidatorEnabled enforces signature verification for all environments (production, staging,
 // qa, uat, unrecognized, or unset). Verification can ONLY be disabled in permitted dev/test environments.
 func isTokenValidatorEnabled() bool {
-	if !isPermittedDevEnvironment() {
+	if !IsPermittedDevEnvironment() {
 		return true
 	}
 	val := strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_VALIDATOR_ENABLED")))
@@ -374,7 +376,11 @@ func ExtractEmailFromJWT(ctx context.Context, tokenStr string) string {
 	}
 
 	now := time.Now().Unix()
-	if claims.Exp > 0 && now > claims.Exp {
+	if claims.Exp <= 0 {
+		slog.Warn("Rejected JWT: missing or non-positive exp claim", "exp", claims.Exp)
+		return ""
+	}
+	if now > claims.Exp {
 		slog.Warn("Rejected JWT: token has expired", "exp", claims.Exp, "now", now)
 		return ""
 	}
@@ -431,7 +437,7 @@ func ExtractEmailFromJWT(ctx context.Context, tokenStr string) string {
 // ResolveToken returns the active JWT token, resolving DEV_STAGING_TOKEN only in permitted dev environments.
 func ResolveToken(incomingToken string) string {
 	if incomingToken == "" {
-		if isPermittedDevEnvironment() {
+		if IsPermittedDevEnvironment() {
 			if devStagingToken := os.Getenv("DEV_STAGING_TOKEN"); devStagingToken != "" {
 				return devStagingToken
 			}

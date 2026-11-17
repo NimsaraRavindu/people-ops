@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,9 @@ import (
 func createMockToken(claims map[string]interface{}) string {
 	header := map[string]string{"alg": "RS256", "typ": "JWT"}
 	hBytes, _ := json.Marshal(header)
+	if _, ok := claims["exp"]; !ok {
+		claims["exp"] = time.Now().Add(1 * time.Hour).Unix()
+	}
 	cBytes, _ := json.Marshal(claims)
 
 	hB64 := base64.RawURLEncoding.EncodeToString(hBytes)
@@ -132,10 +136,27 @@ func TestExtractEmailSecurityChecks(t *testing.T) {
 	}
 
 	// 5. Symmetric algorithm HS256 rejected
+	validExpPayload := base64.RawURLEncoding.EncodeToString(
+		[]byte(fmt.Sprintf(`{"email":"victim@wso2.com","exp":%d}`, time.Now().Add(time.Hour).Unix())),
+	)
 	hsHeader := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	hsToken := hsHeader + "." + payload + ".mock-sig"
+	hsToken := hsHeader + "." + validExpPayload + ".mock-sig"
 	if em := ExtractEmailFromJWT(context.Background(), hsToken); em != "" {
 		t.Fatalf("expected HS256 to be rejected, got %s", em)
+	}
+
+	// 6. Missing exp claim
+	noExpPayload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"victim@wso2.com"}`))
+	noExpToken := rsHeader + "." + noExpPayload + ".mock-sig"
+	if em := ExtractEmailFromJWT(context.Background(), noExpToken); em != "" {
+		t.Fatalf("expected missing exp token to be rejected, got %s", em)
+	}
+
+	// 7. Non-positive exp claim
+	zeroExpPayload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"victim@wso2.com","exp":0}`))
+	zeroExpToken := rsHeader + "." + zeroExpPayload + ".mock-sig"
+	if em := ExtractEmailFromJWT(context.Background(), zeroExpToken); em != "" {
+		t.Fatalf("expected exp: 0 token to be rejected, got %s", em)
 	}
 }
 
