@@ -278,6 +278,9 @@ def extract_email_from_jwt(token_str: str) -> str:
     # 1. Structural Header Validation
     try:
         header = json.loads(_decode_base64url(parts[0]).decode("utf-8"))
+        if not isinstance(header, dict):
+            logger.warning("Rejected JWT: header is not a JSON object")
+            return ""
     except Exception:
         logger.warning("Rejected JWT: malformed header")
         return ""
@@ -296,6 +299,9 @@ def extract_email_from_jwt(token_str: str) -> str:
     # 2. Claims & Expiration Validation
     try:
         claims = json.loads(_decode_base64url(parts[1]).decode("utf-8"))
+        if not isinstance(claims, dict):
+            logger.warning("Rejected JWT: payload claims is not a JSON object")
+            return ""
     except Exception:
         logger.warning("Rejected JWT: malformed payload JSON")
         return ""

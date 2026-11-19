@@ -19,6 +19,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from contextlib import asynccontextmanager
@@ -336,8 +337,10 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
 
     top_k = 5
     raw_top_k = args.get("top_k")
-    if isinstance(raw_top_k, (int, float)) and not isinstance(raw_top_k, bool) and raw_top_k > 0:
-        top_k = min(int(raw_top_k), 10)
+    if isinstance(raw_top_k, int) and not isinstance(raw_top_k, bool):
+        top_k = max(1, min(raw_top_k, 10))
+    elif isinstance(raw_top_k, float) and math.isfinite(raw_top_k) and raw_top_k >= 1.0:
+        top_k = max(1, min(int(raw_top_k), 10))
 
     # 3. Resolve target Google Drive folder ID for the requested tool
     folder_id = ""
@@ -373,10 +376,16 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
             content={"error": "Failed to embed query"},
         )
 
-    # 5. Execute pgvector cosine similarity search
+    # 5. Execute pgvector cosine similarity search filtered by active embedding model
+    current_model = f"{settings.EMBEDDING_PROVIDER}:{settings.EMBEDDING_MODEL}"
     try:
         rows = await asyncio.wait_for(
-            search_similar_chunks(query_vector, drive_folder_id=folder_id, top_k=top_k),
+            search_similar_chunks(
+                query_vector,
+                drive_folder_id=folder_id,
+                top_k=top_k,
+                embedding_model=current_model,
+            ),
             timeout=settings.SEARCH_TIMEOUT_SECONDS,
         )
     except Exception as e:

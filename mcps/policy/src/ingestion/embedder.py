@@ -157,7 +157,9 @@ class TextEmbedder:
         results = await self.embed_texts([query])
         vec = results[0]
         if cache_key:
-            self.cache.put(cache_key, vec)
+            # Do not cache fallback dummy vectors under the local model key if real model is unavailable
+            if not (self.provider in ("local", "fastembed") and _get_fastembed_model(self.model) is None):
+                self.cache.put(cache_key, vec)
         return vec
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:

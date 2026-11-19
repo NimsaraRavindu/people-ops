@@ -49,6 +49,8 @@ def _get_untruncated_tokenizer():
     with _tokenizer_lock:
         if _untruncated_tokenizer is not None:
             return _untruncated_tokenizer
+        if settings.EMBEDDING_PROVIDER in ("openai", "dummy"):
+            return None
         try:
             from .embedder import _get_fastembed_model
             from tokenizers import Tokenizer
@@ -73,6 +75,8 @@ def _get_untruncated_tokenizer():
 
 def count_tokens(text: str) -> int:
     """Accurately counts tokens without truncation using model tokenizer or conservative fallback."""
+    if settings.EMBEDDING_PROVIDER == "dummy":
+        return max(1, len(text) // 4)
     tok = _get_untruncated_tokenizer()
     if tok is not None:
         try:
@@ -113,6 +117,8 @@ class RecursiveTextChunker:
                 f"Configured chunk_size_tokens ({chunk_size_tokens}) cannot exceed model limit "
                 f"({MAX_MODEL_TOKEN_LIMIT})."
             )
+        if chunk_overlap_tokens < 0:
+            raise ValueError(f"chunk_overlap_tokens ({chunk_overlap_tokens}) cannot be negative.")
         self.chunk_size_tokens = chunk_size_tokens
         self.chunk_overlap_tokens = chunk_overlap_tokens
         self.chunk_size_chars = int(chunk_size_tokens * chars_per_token)
@@ -314,13 +320,16 @@ class RecursiveTextChunker:
                         )
                         current_buffer = ""
                 else:
-                    take_len = min(overlap_chars, max(0, max_chars - len(s) - 1))
+                    take_len = min(overlap_chars, max(0, max_chars - len(part) - 1))
                     overlap = (
                         prev_tail[-take_len:]
                         if (prev_tail and take_len > 0)
                         else ""
                     )
-                    current_buffer = (overlap + " " + s).strip() if overlap else s
+                    if overlap:
+                        current_buffer = (overlap + " " + s).strip() + (sep if sep != " " else " ")
+                    else:
+                        current_buffer = part
                     pending_overlap = ""
 
         if current_buffer.strip():

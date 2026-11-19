@@ -16,6 +16,7 @@
 
 # Document text extractors for Google Docs, PDFs, DOCX, and plain text.
 
+import asyncio
 import io
 import logging
 from typing import Optional
@@ -94,67 +95,88 @@ async def fetch_file_text(file_meta: DriveFileMetadata) -> Optional[str]:
                 )
             return resp.text
 
-    # 5. PDF File -> Download binary and extract text with pypdf
+    # 5. PDF File -> Download binary and extract text with pypdf in worker thread
     if file_meta.mime_type == MIME_PDF:
         raw_bytes = await _download_binary(file_meta.id, headers)
-        reader = PdfReader(io.BytesIO(raw_bytes))
-        extracted_pages = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                extracted_pages.append(text.strip())
+        return await asyncio.to_thread(_parse_pdf_bytes, raw_bytes, file_meta.name)
 
-        full_text = "\n\n".join(extracted_pages)
-        _warn_if_suspiciously_short(file_meta.name, full_text, "PDF")
-        return full_text
-
-    # 6. DOCX Document -> Extract text preserving document order of paragraphs and tables
+    # 6. DOCX Document -> Extract text preserving document order of paragraphs and tables in worker thread
     if file_meta.mime_type == MIME_DOCX:
         raw_bytes = await _download_binary(file_meta.id, headers)
-        doc = Document(io.BytesIO(raw_bytes))
-        elements = []
-        for block in doc.element.body:
-            if block.tag.endswith("p"):
-                p = Paragraph(block, doc)
-                if p.text.strip():
-                    elements.append(p.text.strip())
-            elif block.tag.endswith("tbl"):
-                table = Table(block, doc)
-                for row in table.rows:
-                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                    if cells:
-                        elements.append(" | ".join(cells))
-        full_text = "\n\n".join(elements)
-        _warn_if_suspiciously_short(file_meta.name, full_text, "DOCX")
-        return full_text
+        return await asyncio.to_thread(_parse_docx_bytes, raw_bytes, file_meta.name)
 
     return None
 
 
+def _parse_pdf_bytes(raw_bytes: bytes, file_name: str) -> str:
+    """Parses text from PDF bytes off the event loop."""
+    reader = PdfReader(io.BytesIO(raw_bytes))
+    extracted_pages = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            extracted_pages.append(text.strip())
+    full_text = "\n\n".join(extracted_pages)
+    _warn_if_suspiciously_short(file_name, full_text, "PDF")
+    return full_text
+
+
+def _parse_docx_bytes(raw_bytes: bytes, file_name: str) -> str:
+    """Parses text from DOCX bytes preserving block order off the event loop."""
+    doc = Document(io.BytesIO(raw_bytes))
+    elements = []
+    for block in doc.element.body:
+        if block.tag.endswith("p"):
+            p = Paragraph(block, doc)
+            if p.text.strip():
+                elements.append(p.text.strip())
+        elif block.tag.endswith("tbl"):
+            table = Table(block, doc)
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    elements.append(" | ".join(cells))
+    full_text = "\n\n".join(elements)
+    _warn_if_suspiciously_short(file_name, full_text, "DOCX")
+    return full_text
+
+
 async def _download_binary(file_id: str, headers: dict) -> bytes:
-    """Downloads raw binary media for PDF and DOCX parsing with shared drive support."""
+    """Streams raw binary media for PDF and DOCX parsing, enforcing size limits and identity encoding."""
+    req_headers = {**headers, "Accept-Encoding": "identity"}
     async with httpx.AsyncClient(timeout=60.0) as http:
-        resp = await http.get(
+        async with http.stream(
+            "GET",
             f"{DRIVE_API_BASE}/files/{file_id}",
             params={"alt": "media", "supportsAllDrives": "true"},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to download binary file ({file_id}): {resp.status_code} - {resp.text}"
-            )
-        content_length = resp.headers.get("Content-Length")
-        if content_length and int(content_length) > MAX_BINARY_FILE_SIZE:
-            raise ValueError(
-                f"File {file_id} exceeds maximum permitted binary download size "
-                f"({content_length} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
-            )
-        if len(resp.content) > MAX_BINARY_FILE_SIZE:
-            raise ValueError(
-                f"File {file_id} exceeds maximum permitted binary download size "
-                f"({len(resp.content)} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
-            )
-        return resp.content
+            headers=req_headers,
+        ) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Failed to download binary file ({file_id}): {resp.status_code} {resp.reason_phrase}"
+                )
+            encoding = resp.headers.get("Content-Encoding", "identity").lower()
+            if encoding not in ("identity", ""):
+                raise ValueError(
+                    f"Unexpected compressed Content-Encoding '{encoding}' for file ({file_id})."
+                )
+            content_length = resp.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_BINARY_FILE_SIZE:
+                raise ValueError(
+                    f"File {file_id} exceeds maximum permitted binary download size "
+                    f"({content_length} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
+                )
+            chunks = []
+            downloaded = 0
+            async for chunk in resp.aiter_raw(chunk_size=65536):
+                downloaded += len(chunk)
+                if downloaded > MAX_BINARY_FILE_SIZE:
+                    raise ValueError(
+                        f"File {file_id} exceeds maximum permitted binary download size "
+                        f"({downloaded} bytes > {MAX_BINARY_FILE_SIZE} bytes)."
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
 
 
 def _warn_if_suspiciously_short(name: str, text: str, kind: str) -> None:

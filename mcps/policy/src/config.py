@@ -18,7 +18,7 @@
 
 import os
 from typing import Optional
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Server Configuration
     ENV: Optional[str] = None
     ENVIRONMENT: str = "development"
-    PORT: int = 8003
+    PORT: int = 8080
     LOG_LEVEL: str = "info"
 
     _explicit_env: bool = PrivateAttr(default=False)
@@ -200,8 +200,8 @@ class Settings(BaseSettings):
 
         user_auth = ""
         if self.DB_USER:
-            user = quote_plus(self.DB_USER)
-            password = quote_plus(self.DB_PASSWORD or "")
+            user = quote(self.DB_USER, safe="")
+            password = quote(self.DB_PASSWORD or "", safe="")
             user_auth = f"{user}:{password}@" if self.DB_PASSWORD else f"{user}@"
         return (
             f"postgresql://{user_auth}{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?sslmode={ssl_mode}"

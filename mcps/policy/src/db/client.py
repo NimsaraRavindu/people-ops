@@ -59,11 +59,8 @@ async def get_db_pool() -> asyncpg.Pool:
         logger.info("Initializing PostgreSQL connection pool...")
 
         async def init_connection(conn: asyncpg.Connection):
-            # Register pgvector codec if extension is active
-            try:
-                await register_vector(conn)
-            except Exception as e:
-                logger.debug(f"pgvector registration check: {e}")
+            # Register pgvector codec for vector encoding/decoding
+            await register_vector(conn)
 
         _pool = await asyncpg.create_pool(
             dsn=dsn,
@@ -106,6 +103,8 @@ async def init_db() -> None:
     finally:
         await bootstrap_conn.close()
 
+    # Reset any existing pool so newly established connections cleanly register vector codecs
+    await close_db_pool()
     # Pre-warm connection pool with registered vector codecs
     await get_db_pool()
 
@@ -286,7 +285,8 @@ async def get_status_summary() -> Dict[str, Any]:
 async def search_similar_chunks(
     embedding: List[float],
     drive_folder_id: Optional[str] = None,
-    top_k: int = 5
+    top_k: int = 5,
+    embedding_model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Performs cosine distance similarity search on policy chunks."""
     pool = await get_db_pool()
@@ -302,15 +302,20 @@ async def search_similar_chunks(
         JOIN policy_documents pd ON pd.id = pc.document_id
     """
     params: List[Any] = [embedding]
+    where_clauses: List[str] = []
 
     if drive_folder_id:
-        base_query += " WHERE pd.drive_folder_id = $2"
         params.append(drive_folder_id)
-        base_query += " ORDER BY pc.embedding <=> $1::vector LIMIT $3;"
-        params.append(top_k)
-    else:
-        base_query += " ORDER BY pc.embedding <=> $1::vector LIMIT $2;"
-        params.append(top_k)
+        where_clauses.append(f"pd.drive_folder_id = ${len(params)}")
+
+    if embedding_model:
+        params.append(embedding_model)
+        where_clauses.append(f"pd.embedding_model = ${len(params)}")
+
+    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.append(top_k)
+    limit_param = len(params)
+    final_query = f"{base_query}{where_sql} ORDER BY pc.embedding <=> $1::vector LIMIT ${limit_param};"
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -329,5 +334,5 @@ async def search_similar_chunks(
             except Exception as e:
                 logger.error(f"Failed to configure vector search session settings: {e}")
                 raise
-            rows = await conn.fetch(base_query, *params)
+            rows = await conn.fetch(final_query, *params)
             return [dict(r) for r in rows]

@@ -4,7 +4,8 @@ endpoints:
     displayName: Policy MCP
     service:
       basePath: /
-      port: 8003
+      port: 8080
     type: REST
     networkVisibilities:
-      - Project
+      - Public
+    schemaFilePath: openapi.yaml

@@ -44,16 +44,23 @@ def _make_test_jwt(email: str = "nimsaraa@wso2.com", exp_offset: int = 3600) -> 
 
 
 @pytest.fixture(autouse=True)
-def force_dummy_embedding():
-    """Forces dummy embedding provider during API tests for speed and repeatability."""
+def force_dummy_embedding(monkeypatch):
+    """Forces dummy embedding provider and isolates token validator for repeatable API tests."""
+    monkeypatch.setenv("TOKEN_VALIDATOR_ENABLED", "false")
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("APP_ENV", "development")
     orig_provider = settings.EMBEDDING_PROVIDER
+    orig_val_enabled = settings.TOKEN_VALIDATOR_ENABLED
     settings.EMBEDDING_PROVIDER = "dummy"
+    settings.TOKEN_VALIDATOR_ENABLED = False
     from src.ingestion.embedder import embedder
 
     embedder.provider = "dummy"
     embedder.cache.clear()
     yield
     settings.EMBEDDING_PROVIDER = orig_provider
+    settings.TOKEN_VALIDATOR_ENABLED = orig_val_enabled
     embedder.provider = orig_provider
     embedder.cache.clear()
 
@@ -311,3 +318,106 @@ async def test_lifespan_shutdown_cancels_and_awaits_background_workers():
         assert task.cancelled()
         assert task not in _background_tasks
         mock_close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_binary_unexpected_compression():
+    from src.drive.extractor import _download_binary
+
+    mock_resp = AsyncMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"Content-Encoding": "gzip", "Content-Length": "100"}
+
+    mock_stream_ctx = AsyncMock()
+    mock_stream_ctx.__aenter__.return_value = mock_resp
+    mock_stream_ctx.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient.stream", return_value=mock_stream_ctx):
+        with pytest.raises(ValueError, match="Unexpected compressed Content-Encoding"):
+            await _download_binary("test-file-id", {"Authorization": "Bearer test"})
+
+
+@pytest.mark.asyncio
+async def test_list_folder_files_inaccessible_folder():
+    from src.drive.client import GoogleDriveClient
+
+    client = GoogleDriveClient()
+    mock_folder_resp = AsyncMock()
+    mock_folder_resp.status_code = 404
+    mock_folder_resp.text = "File not found"
+
+    with patch.object(client, "get_access_token", return_value="mock-token"), patch(
+        "httpx.AsyncClient.get", return_value=mock_folder_resp
+    ):
+        with pytest.raises(RuntimeError, match="Target Drive folder .* not found or inaccessible"):
+            await client.list_folder_files("missing-folder-id")
+
+
+@pytest.mark.asyncio
+async def test_list_folder_files_incomplete_search():
+    from unittest.mock import MagicMock
+    from src.drive.client import GoogleDriveClient
+
+    client = GoogleDriveClient()
+    mock_folder_resp = MagicMock()
+    mock_folder_resp.status_code = 200
+    mock_folder_resp.json.return_value = {"id": "folder-123", "name": "HR"}
+
+    mock_list_resp = MagicMock()
+    mock_list_resp.status_code = 200
+    mock_list_resp.json.return_value = {
+        "files": [{"id": "f1", "name": "doc1", "mimeType": "text/plain", "modifiedTime": "2026-10-01T00:00:00Z"}],
+        "incompleteSearch": True,
+    }
+
+    async def mock_get(url, **kwargs):
+        if url.endswith("/files/folder-123"):
+            return mock_folder_resp
+        return mock_list_resp
+
+    with patch.object(client, "get_access_token", return_value="mock-token"), patch(
+        "httpx.AsyncClient.get", side_effect=mock_get
+    ):
+        with pytest.raises(RuntimeError, match="incomplete search results"):
+            await client.list_folder_files("folder-123")
+
+
+@pytest.mark.asyncio
+async def test_list_folder_files_empty_folder():
+    from unittest.mock import MagicMock
+    from src.drive.client import GoogleDriveClient
+
+    client = GoogleDriveClient()
+    mock_folder_resp = MagicMock()
+    mock_folder_resp.status_code = 200
+    mock_folder_resp.json.return_value = {"id": "folder-empty", "name": "EmptyFolder"}
+
+    mock_list_resp = MagicMock()
+    mock_list_resp.status_code = 200
+    mock_list_resp.json.return_value = {"files": [], "incompleteSearch": False}
+
+    async def mock_get(url, **kwargs):
+        if url.endswith("/files/folder-empty"):
+            return mock_folder_resp
+        return mock_list_resp
+
+    with patch.object(client, "get_access_token", return_value="mock-token"), patch(
+        "httpx.AsyncClient.get", side_effect=mock_get
+    ):
+        files = await client.list_folder_files("folder-empty")
+        assert files == []
+
+
+@pytest.mark.asyncio
+async def test_sync_drive_folder_empty_listing_prunes():
+    from src.ingestion.pipeline import sync_drive_folder
+
+    with patch("src.ingestion.pipeline.drive_client.list_folder_files", return_value=[]), patch(
+        "src.ingestion.pipeline.prune_missing_documents", return_value=3
+    ) as mock_prune:
+        stats = await sync_drive_folder("empty-folder-id", label="TEST_EMPTY")
+        assert stats["status"] == "completed"
+        assert stats["total_files_found"] == 0
+        assert stats["documents_pruned"] == 3
+        mock_prune.assert_called_once_with("empty-folder-id", [])
+

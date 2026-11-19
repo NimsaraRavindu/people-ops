@@ -100,7 +100,7 @@ async def sync_drive_folder(folder_id: str, label: str = "Folder") -> Dict[str, 
             stats["documents_failed"] += 1
 
     # Prune documents removed from Google Drive only when listing succeeded and no file processing errors occurred
-    if stats["documents_failed"] == 0 and len(files) > 0:
+    if stats["documents_failed"] == 0:
         active_doc_ids = [f.id for f in files]
         pruned_count = await prune_missing_documents(folder_id, active_doc_ids)
         stats["documents_pruned"] = pruned_count

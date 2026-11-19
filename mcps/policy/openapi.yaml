@@ -6,13 +6,14 @@ info:
     providing semantic vector search over HR and Training documents using BAAI/bge-base-en-v1.5.
   version: 1.0.0
 servers:
-  - url: http://localhost:8003
+  - url: http://localhost:8080
     description: Local development server
 paths:
   /health:
     get:
       summary: Health check
       description: Returns service liveness and PostgreSQL database connectivity status.
+      security: []
       responses:
         "200":
           description: Service and database are healthy
@@ -50,6 +51,7 @@ paths:
     get:
       summary: Readiness check
       description: Verifies that database schema migrations and pgvector connectivity are ready.
+      security: []
       responses:
         "200":
           description: Service is ready
@@ -70,6 +72,7 @@ paths:
     get:
       summary: Discover MCP capabilities
       description: Returns registered capability buckets and tool definitions for Agent Core.
+      security: []
       responses:
         "200":
           description: List of capability kits
@@ -113,6 +116,8 @@ paths:
     post:
       summary: Query HR policies
       description: Search official WSO2 HR and People Operations policy documents using semantic search.
+      security:
+        - BearerAuth: []
       parameters:
         - in: header
           name: Authorization
@@ -177,6 +182,8 @@ paths:
     post:
       summary: Query training playbook
       description: Search WSO2 Training & Certification playbook for exam guides, badges, and voucher queries.
+      security:
+        - BearerAuth: []
       parameters:
         - in: header
           name: Authorization
@@ -237,3 +244,11 @@ paths:
           description: Unauthorized - missing or invalid token
         "500":
           description: Internal server or search error
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Relayed employee Bearer token or Choreo x-jwt-assertion.

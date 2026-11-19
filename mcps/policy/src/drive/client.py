@@ -101,6 +101,7 @@ class GoogleDriveClient:
     async def list_folder_files(self, folder_id: str) -> List[DriveFileMetadata]:
         """
         Lists all active files directly under the designated folder ID.
+        Verifies that the target folder exists and is accessible before listing.
         Note: Does not recurse into subdirectories.
         """
         token = await self.get_access_token()
@@ -109,10 +110,22 @@ class GoogleDriveClient:
         page_token: Optional[str] = None
 
         async with httpx.AsyncClient(timeout=30.0) as http:
+            # Verify folder exists and is accessible before listing
+            folder_resp = await http.get(
+                f"{DRIVE_API_BASE}/files/{folder_id}",
+                params={"supportsAllDrives": "true", "fields": "id,name,trashed"},
+                headers=headers,
+            )
+            if folder_resp.status_code != 200:
+                raise RuntimeError(
+                    f"Target Drive folder ({folder_id}) not found or inaccessible: "
+                    f"{folder_resp.status_code} - {folder_resp.text[:200]}"
+                )
+
             while True:
                 params: Dict[str, Any] = {
                     "q": f"'{folder_id}' in parents and trashed = false",
-                    "fields": "files(id,name,mimeType,modifiedTime),nextPageToken",
+                    "fields": "files(id,name,mimeType,modifiedTime),nextPageToken,incompleteSearch",
                     "pageSize": 100,
                     "supportsAllDrives": "true",
                     "includeItemsFromAllDrives": "true",
@@ -132,6 +145,10 @@ class GoogleDriveClient:
                     )
 
                 body = resp.json()
+                if body.get("incompleteSearch", False):
+                    raise RuntimeError(
+                        f"Google Drive returned incomplete search results for folder ({folder_id})."
+                    )
                 for item in body.get("files", []):
                     files.append(
                         DriveFileMetadata(

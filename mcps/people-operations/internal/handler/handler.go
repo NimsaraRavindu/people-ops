@@ -618,6 +618,7 @@ func (h *Handler) buildCommutePayload(
 		metaURL := fmt.Sprintf("%s/subscriptions/meta-info", h.cfg.SubscriptionBackendURL)
 		metaReq, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
 		if err != nil {
+			slog.Error("Failed to create subscription distance range request", "error", err)
 			return nil, http.StatusBadGateway,
 				"Failed to create request for subscription distance ranges"
 		}
@@ -626,6 +627,7 @@ func (h *Handler) buildCommutePayload(
 
 		metaResp, err := h.cfg.HTTPClient.Do(metaReq)
 		if err != nil {
+			slog.Error("Failed to reach subscription service to resolve distance range", "error", err)
 			return nil, http.StatusBadGateway,
 				"Failed to reach subscription service to resolve distance range"
 		}
