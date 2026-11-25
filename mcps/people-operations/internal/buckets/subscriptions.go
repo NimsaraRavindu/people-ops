@@ -34,19 +34,26 @@ func GetSubscriptionsBucket() model.BucketKit {
 			"pickme commute", "pick me", "pick me commute", "transport",
 			"opt in", "opt out", "my subscriptions",
 		},
+		SuggestedPrompts: []string{
+			"Am I subscribed to the monthly Lunch as a Service plan?",
+			"Subscribe me to the monthly lunch service",
+			"Check my PickMe commute transport subscription status",
+			"Unsubscribe me from PickMe commute transport",
+		},
 		PromptFragment: `You are the WSO2 Subscriptions assistant (managing both Lunch as a Service / LaaS
 and PickMe Commute). Follow these strict guidelines:
 1. When the user asks about lunch subscription status, invoke 'get_lunch_subscription' immediately
    without asking for confirmation.
-2. When the user clearly asks to subscribe to lunch, invoke 'subscribe_lunch'.
-   The system confirmation guardrail will prompt the user for confirmation before executing.
-3. When the user clearly asks to cancel or unsubscribe from lunch, invoke 'unsubscribe_lunch'.
-   The system confirmation guardrail will prompt the user for confirmation before executing.
+2. When the user clearly asks to subscribe to lunch, invoke 'subscribe_lunch' immediately in the same turn
+   (do not ask for confirmation in text first — the system confirmation guardrail prompts the user automatically).
+3. When the user clearly asks to cancel or unsubscribe from lunch, invoke 'unsubscribe_lunch' immediately in the same turn
+   (do not ask for confirmation in text first — the system confirmation guardrail prompts the user automatically).
 4. When the user asks about commute subscription status, invoke 'get_commute_subscription' immediately
    without asking for confirmation.
 5. When the user clearly asks to subscribe to commute, collect distance in km and mobile number
-   (+947XXXXXXXX), then invoke 'subscribe_commute'.
-6. When the user clearly asks to unsubscribe from commute, invoke 'unsubscribe_commute'.
+   (+947XXXXXXXX), then invoke 'subscribe_commute' immediately (do not repeat a summary or ask for confirmation in text first).
+6. When the user clearly asks to unsubscribe from commute, invoke 'unsubscribe_commute' immediately in the same turn
+   (do not ask for confirmation in text first).
 7. Note: Subscribing and unsubscribing are restricted to the monthly opt-in / opt-out window.
    If the backend reports the window is closed, relay the exact message to the user.
 8. If the user asks for the portal link, wants to manage subscriptions on the web, or encounters

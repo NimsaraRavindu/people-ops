@@ -44,6 +44,9 @@ func TestGetAllBuckets(t *testing.T) {
 		if len(b.Tools) == 0 {
 			t.Errorf("bucket %s has no registered tools", name)
 		}
+		if len(b.SuggestedPrompts) == 0 {
+			t.Errorf("bucket %s has no suggested prompts", name)
+		}
 	}
 }
 

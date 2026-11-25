@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     DEV_MOCK_USER_ENABLED: bool = False
     DEV_STAGING_TOKEN: Optional[str] = None
     SEARCH_TIMEOUT_SECONDS: float = 10.0
+    MIN_SIMILARITY_SCORE: float = 0.45
 
     # Sync Cadence & Triggers
     SYNC_ENABLED: bool = True

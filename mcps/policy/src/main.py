@@ -335,7 +335,7 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
             },
         )
 
-    top_k = 5
+    top_k = 7
     raw_top_k = args.get("top_k")
     if isinstance(raw_top_k, int) and not isinstance(raw_top_k, bool):
         top_k = max(1, min(raw_top_k, 10))
@@ -378,6 +378,7 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
 
     # 5. Execute pgvector cosine similarity search filtered by active embedding model
     current_model = f"{settings.EMBEDDING_PROVIDER}:{settings.EMBEDDING_MODEL}"
+    min_sim = settings.MIN_SIMILARITY_SCORE
     try:
         rows = await asyncio.wait_for(
             search_similar_chunks(
@@ -385,6 +386,7 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
                 drive_folder_id=folder_id,
                 top_k=top_k,
                 embedding_model=current_model,
+                min_similarity=min_sim,
             ),
             timeout=settings.SEARCH_TIMEOUT_SECONDS,
         )
@@ -402,6 +404,7 @@ async def execute_tool(tool_name: str, request: Request) -> JSONResponse:
             similarity=float(row["similarity_score"]),
         )
         for row in rows
+        if float(row["similarity_score"]) >= min_sim
     ]
 
     resp_payload = ToolResponse(

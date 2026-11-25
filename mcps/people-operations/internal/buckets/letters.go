@@ -33,6 +33,11 @@ func GetLettersBucket() model.BucketKit {
 			"bank letter", "loan letter", "proof of employment", "employment letter",
 			"official letter",
 		},
+		SuggestedPrompts: []string{
+			"How do I request a visa support letter for travel?",
+			"I need a salary confirmation letter for a bank loan",
+			"Where is the People Operations letter request form?",
+		},
 		PromptFragment: `You are the WSO2 People Operations Documentation assistant. Follow these strict guidelines:
 1. When the user asks for any official letter (employment confirmation, visa letter, salary letter, passport renewal,
    service letter, internship letter, EPF/ETF name mismatch letter, PFCA account opening letter, etc.) or asks how

@@ -285,8 +285,9 @@ async def get_status_summary() -> Dict[str, Any]:
 async def search_similar_chunks(
     embedding: List[float],
     drive_folder_id: Optional[str] = None,
-    top_k: int = 5,
+    top_k: int = 7,
     embedding_model: Optional[str] = None,
+    min_similarity: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Performs cosine distance similarity search on policy chunks."""
     pool = await get_db_pool()
@@ -335,4 +336,8 @@ async def search_similar_chunks(
                 logger.error(f"Failed to configure vector search session settings: {e}")
                 raise
             rows = await conn.fetch(final_query, *params)
-            return [dict(r) for r in rows]
+            return [
+                dict(r)
+                for r in rows
+                if min_similarity is None or float(r["similarity_score"]) >= min_similarity
+            ]

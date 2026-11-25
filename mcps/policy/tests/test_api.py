@@ -196,6 +196,41 @@ async def test_tools_query_policy_success():
 
 
 @pytest.mark.asyncio
+async def test_tools_query_policy_default_top_k_and_min_similarity_filter():
+    transport = ASGITransport(app=app)
+    token = _make_test_jwt()
+    mock_rows = [
+        {
+            "document_name": "Sabbatical Leave Policy.pdf",
+            "excerpt": "Employees with 3 years of continuous tenure are eligible.",
+            "similarity_score": 0.82,
+        },
+        {
+            "document_name": "Unrelated Doc.pdf",
+            "excerpt": "Irrelevant weak chunk below threshold.",
+            "similarity_score": 0.31,
+        },
+    ]
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(settings, "POLICY_DRIVE_FOLDER_ID", "policy-folder-123"), patch(
+            "src.main.search_similar_chunks", new_callable=AsyncMock, return_value=mock_rows
+        ) as mock_search:
+            resp = await client.post(
+                "/tools/query_policy",
+                json={"query": "What is the sabbatical leave eligibility?"},
+                headers={"X-JWT-Assertion": token},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert mock_search.call_args.kwargs["top_k"] == 7
+            assert mock_search.call_args.kwargs["min_similarity"] == pytest.approx(
+                settings.MIN_SIMILARITY_SCORE
+            )
+            assert data["source_count"] == 1
+            assert data["results"][0]["document"] == "Sabbatical Leave Policy.pdf"
+
+
+@pytest.mark.asyncio
 async def test_tools_query_training_success():
     transport = ASGITransport(app=app)
     token = _make_test_jwt()

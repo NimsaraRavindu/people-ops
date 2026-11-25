@@ -32,6 +32,11 @@ func GetVehicleBucket() model.BucketKit {
 			"number plate", "registered vehicles", "my vehicles",
 			"register my car", "register my bike", "parking permit",
 		},
+		SuggestedPrompts: []string{
+			"What vehicles do I have registered for office parking?",
+			"Register my car CAB 1234 for campus parking",
+			"Remove my old vehicle from office parking",
+		},
 		PromptFragment: `You are the WSO2 Vehicle Management assistant. Follow these strict guidelines:
 1. You can only perform actions for the currently authenticated user. Reject requests for other employees.
 2. Read-only queries (listing registered vehicles): call 'get_vehicles' immediately without asking for confirmation.
@@ -39,8 +44,8 @@ func GetVehicleBucket() model.BucketKit {
    display internal database vehicle IDs. Only include deleted/inactive vehicles if the user explicitly asks.
 3. Adding a vehicle: collect the registration number and vehicle type (CAR or MOTORCYCLE). Map friendly names:
    "car" -> CAR, "motorcycle"/"bike"/"motorbike" -> MOTORCYCLE. Plate must follow Sri Lankan format (1-3 letters
-   or digits, a single space, then 4 digits, e.g. "ABC 1234" or "WP 1234"). Present a clear summary and invoke
-   'add_vehicle' directly.
+   or digits, a single space, then 4 digits, e.g. "ABC 1234" or "WP 1234"). Invoke
+   'add_vehicle' directly (do not repeat a bulleted summary in text, as the system confirmation card displays the details).
 4. Deleting a vehicle: first call 'get_vehicles' with vehicleStatus='ACTIVE' to show active vehicles with registration
    number and type (do NOT show numeric vehicle IDs). When the user specifies which vehicle to delete, invoke
    'delete_vehicle' directly with its numeric vehicleId.
@@ -77,8 +82,9 @@ Be concise and friendly.`,
 			},
 			{
 				Name: "add_vehicle",
-				Description: "Register a new vehicle for the employee. Only call after the user has explicitly confirmed " +
-					"the registration number and vehicle type. Vehicle registration plate must be valid Sri Lankan format " +
+				Description: "Register a new vehicle for the employee. Requires user confirmation before execution — " +
+					"call immediately once the registration number and vehicle type are known (the system guardrail " +
+					"handles confirmation). Vehicle registration plate must be valid Sri Lankan format " +
 					"(e.g. 'ABC 1234' or 'WP 1234').",
 				InputSchema: model.InputSchema{
 					Type: "object",
@@ -100,8 +106,9 @@ Be concise and friendly.`,
 			},
 			{
 				Name: "delete_vehicle",
-				Description: "Delete a registered vehicle by its numeric ID. Only call after the user has explicitly " +
-					"confirmed which vehicle to delete.",
+				Description: "Delete a registered vehicle by its numeric ID. Requires user confirmation before " +
+					"execution — call immediately once the user specifies which vehicle to delete (the system " +
+					"guardrail handles confirmation).",
 				InputSchema: model.InputSchema{
 					Type: "object",
 					Properties: map[string]model.ToolProperty{

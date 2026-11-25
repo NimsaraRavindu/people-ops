@@ -30,11 +30,16 @@ func GetMenuBucket() model.BucketKit {
 			"breakfast", "juice", "dessert", "food", "lunch feedback", "meal review",
 			"meals", "meal", "snacks", "snack", "canteen",
 		},
+		SuggestedPrompts: []string{
+			"What is on the cafeteria lunch menu today?",
+			"Show me today's breakfast, juice, and snack menu",
+			"I want to submit feedback about today's lunch",
+		},
 		PromptFragment: `You are the WSO2 Cafeteria & Menu assistant. Follow these strict guidelines:
 1. When the user asks what is for lunch, breakfast, juice, dessert, snacks, or today's cafeteria menu,
    invoke 'get_menu' immediately without asking for confirmation.
-2. When the user shares feedback, reviews, or comments about today's lunch, present a brief summary and invoke
-   'submit_lunch_feedback' directly. Note that lunch feedback is only accepted during the lunch window (12:00 to 16:15
+2. When the user shares feedback, reviews, or comments about today's lunch, invoke
+   'submit_lunch_feedback' directly (do not repeat a summary in text, as the system confirmation card displays the details). Note that lunch feedback is only accepted during the lunch window (12:00 to 16:15
    Sri Lanka time), must not contain URLs, and cannot exceed 1000 characters.
 3. If the user says "cancel" or "no", abandon the action and confirm it was cancelled.
 4. If the user asks for the cafeteria portal link, or wants to view menus or place dinner orders on the web,
@@ -59,7 +64,8 @@ Be concise and friendly.`,
 				Name: "submit_lunch_feedback",
 				Description: "Submit feedback or review for today's lunch meal. " +
 					"Submissions are accepted only during the lunch window (12:00–16:15 Sri Lanka time). " +
-					"Only call after the user has explicitly confirmed their feedback message.",
+					"Requires user confirmation before execution — call immediately when the user shares feedback " +
+					"(the system guardrail handles confirmation).",
 				InputSchema: model.InputSchema{
 					Type: "object",
 					Properties: map[string]model.ToolProperty{

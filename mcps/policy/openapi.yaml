@@ -97,6 +97,10 @@ paths:
                       type: array
                       items:
                         type: string
+                    suggested_prompts:
+                      type: array
+                      items:
+                        type: string
                     prompt_fragment:
                       type: string
                     tools:
@@ -147,8 +151,8 @@ paths:
                 top_k:
                   type: integer
                   description: Maximum number of excerpts to return (1-10)
-                  default: 5
-                  example: 5
+                  default: 7
+                  example: 7
       responses:
         "200":
           description: Search results
@@ -213,8 +217,8 @@ paths:
                 top_k:
                   type: integer
                   description: Maximum number of excerpts to return (1-10)
-                  default: 5
-                  example: 5
+                  default: 7
+                  example: 7
       responses:
         "200":
           description: Search results

@@ -53,6 +53,7 @@ class BucketKit(BaseModel):
     description: str
     version: str
     trigger_phrases: List[str]
+    suggested_prompts: List[str] = Field(default_factory=list)
     prompt_fragment: str
     tools: List[Tool]
 

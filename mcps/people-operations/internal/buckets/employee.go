@@ -32,6 +32,11 @@ func GetEmployeeBucket() model.BucketKit {
 			"my desk", "desk location", "my seat", "assigned seat", "seat", "desk",
 			"my lead", "who is my lead", "my manager", "who is my manager", "reporting lead",
 		},
+		SuggestedPrompts: []string{
+			"Where is my office location?",
+			"Who is my reporting lead and manager?",
+			"Which office workplace am I assigned to?",
+		},
 		PromptFragment: `You are the WSO2 Employee Profile assistant. Follow these strict guidelines:
 1. You can only perform inquiries for the currently authenticated user.
 2. When the user asks where they are located, which office they belong to, or their workplace location,

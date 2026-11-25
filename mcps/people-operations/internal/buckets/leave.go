@@ -61,8 +61,9 @@ func GetLeaveBucket() model.BucketKit {
    - If workingDays is 0, inform the user that the selected dates contain no working days (e.g. falls entirely
      on weekends or public holidays).
    - If hasOverlap is true or an error occurs, inform the user of the conflict or error.
-   - Once 'validate_leave' succeeds, report verified working days and immediately invoke 'submit_leave' in the
-     SAME turn while asking the user if they'd like to proceed.
+   - Once 'validate_leave' succeeds, briefly state the verified working days in one short sentence and immediately
+     invoke 'submit_leave' in the SAME turn (do NOT list a bulleted summary or ask for confirmation in your text,
+     as the system confirmation card displays the details and prompt automatically).
    - CRITICAL: Do NOT ask for confirmation in plain text before invoking 'submit_leave'. 'submit_leave' is safely
      intercepted by the system guardrail and will NOT execute until the user confirms. If you ask in text first
      without invoking 'submit_leave', the user will be forced to confirm twice!
